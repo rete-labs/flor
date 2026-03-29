@@ -1,0 +1,11 @@
+# cargo output dir
+/target
+
+# all dotfiles except some
+.*
+!.cargo
+!.gitignore
+!.husky
+
+# all editor backup files
+*~

@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+
+COMMIT_MSG_FILE="$1"
+COMMIT_SOURCE="$2"
+SHA1="$3"
+
+TEMPLATE_HEADER_LINE="# <type>[!][(<scope>)]: <summary> (<issue-ref>)"
+
+# Do nothing for merge/squash.
+if [[ "$COMMIT_SOURCE" == "merge" || "$COMMIT_SOURCE" == "squash" ]]; then
+  exit 0
+fi
+
+has_template() {
+  grep -qF "$TEMPLATE_HEADER_LINE" "$COMMIT_MSG_FILE"
+}
+
+BRANCH_NAME="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+
+HEADER=""
+
+# Generate the header if:
+# - it is not "amend", so SHA1 must be empty,
+# - branch name corresponds the regex.
+if [[ -z "$SHA1" && "$BRANCH_NAME" =~ ^([^/]+)/([^/]+)/(.+)$ ]]; then
+  TYPE="${BASH_REMATCH[1]}"
+  ISSUE_REF="${BASH_REMATCH[2]}"
+
+  HEADER="${TYPE}: <summary> (#${ISSUE_REF})"
+fi
+
+CONTENT="$(cat "$COMMIT_MSG_FILE")"
+
+# Generate new content
+{
+  if [[ -n "$HEADER" ]]; then
+    echo "$HEADER"
+  fi
+
+  echo "$CONTENT"
+
+  if ! has_template; then
+    echo "# Message template:"
+    echo "$TEMPLATE_HEADER_LINE"
+    echo "#"
+    echo "# [optional body]"
+    echo "#"
+    echo "# [optional footer]"
+  fi
+} > "$COMMIT_MSG_FILE"
+

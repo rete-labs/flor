@@ -1,0 +1,10 @@
+[package]
+name = "flor"
+version = "0.1.0"
+edition = "2024"
+description = "Service mesh for network infrastructure and robotics"
+repository = "https://github.com/rete-labs/flor"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+husky-rs = "0.3"

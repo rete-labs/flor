@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+run() {
+  echo "▶ $1"
+  if ! eval "$1"; then
+    echo "❌ Failed: $1"
+    exit 1
+  fi
+}
+
+run "cargo fmt --check"
+run "cargo clippy"
+run "cargo test --quiet"
+
+echo "✅ Pre-commit checks passed"
