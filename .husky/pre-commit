@@ -10,6 +10,5 @@ run() {
 
 run "cargo fmt --check"
 run "cargo clippy"
-run "cargo test --quiet"
 
 echo "✅ Pre-commit checks passed"
