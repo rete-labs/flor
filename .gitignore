@@ -6,6 +6,7 @@
 !.cargo
 !.gitignore
 !.husky
+!.github
 
 # all editor backup files
 *~
