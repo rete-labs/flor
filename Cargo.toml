@@ -1,15 +1,24 @@
 [package]
-name = "flor"
-version = "0.1.0"
-edition = "2024"
 description = "Service mesh for network infrastructure and robotics"
-repository = "https://github.com/rete-labs/flor"
+edition = "2024"
 license = "MIT OR Apache-2.0"
+name = "flor"
+repository = "https://github.com/rete-labs/flor"
+version = "0.1.0"
 
 [dependencies]
-chrono = {version = "0.4", default-features = false, features = ["clock"]}
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 error-stack = "0.7"
 husky-rs = "0.3"
 log = { version = "0.4", features = ["std"] }
+
+# Using "ring" backend across all crypto libs, as quinn uses it by default
+quinn = { version = "0.11" }
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
 thiserror = "2.0"
+tokio = { version = "1", features = ["full"] }
