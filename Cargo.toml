@@ -10,6 +10,7 @@ version = "0.1.0"
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
+mockall_double = "0.3"
 env_logger = "0.11"
 error-stack = "0.7"
 husky-rs = "0.3"
@@ -21,3 +22,8 @@ tokio = { version = "1", features = ["full"] }
 quinn = { version = "0.11" }
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+[dev-dependencies]
+ctor = "0.8"
+mockall = "0.14"
+serial_test = "3.4"

@@ -8,7 +8,10 @@ use error_stack::{Report, ResultExt};
 
 use flor::{
     logging,
-    transport::{QuicEndpoint, UdpResolver},
+    transport::{
+        QuicEndpoint, UdpResolver,
+        endpoint::connection::{Accept, Open},
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -131,7 +134,7 @@ async fn run() -> Result<(), Report<Error>> {
     Ok(())
 }
 
-async fn handle_connection(service_name: String, conn: quinn::Connection) {
+async fn handle_connection<C: Accept>(service_name: String, conn: C) {
     loop {
         // Accept a new bidirectional stream
         let stream = match conn.accept_bi().await {
