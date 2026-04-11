@@ -7,11 +7,14 @@ use clap::Parser;
 use error_stack::{Report, ResultExt};
 
 use flor::{
-    logging,
-    transport::{
-        QuicConnector, UdpResolver,
-        endpoint::connection::{Accept, Open},
+    core::{
+        self,
+        transport::{
+            QuicConnector, UdpResolver,
+            endpoint::connection::{Accept, Open},
+        },
     },
+    logging,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -99,7 +102,7 @@ async fn run() -> Result<(), Report<Error>> {
         .into_std()
         .change_context(Error("Failed to convert UDP socket to std".into()))?;
 
-    let (connector, mut acceptor) = flor::transport::create_endpoint(
+    let (connector, mut acceptor) = core::transport::create_endpoint(
         served.iter().map(|s| s.to_string()).collect(),
         Arc::new(resolver),
         socket,

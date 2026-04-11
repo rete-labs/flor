@@ -118,7 +118,7 @@ mock! {
             &self,
         ) -> Result<
             quinn::crypto::rustls::HandshakeData,
-            error_stack::Report<crate::transport::Error>,
+            error_stack::Report<crate::core::transport::Error>,
         >;
     }
 }
