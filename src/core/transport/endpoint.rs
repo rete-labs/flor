@@ -217,7 +217,7 @@ enum ValidationError {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::transport::resolver::MockResolver;
+    use crate::core::transport::resolver::MockResolver;
     use mocks::{MockAsyncUdpSocket, MockEndpoint, MockIncoming, MockInspectConn, MockRuntime};
 
     // We need to serialize tests because of global mocks for static functions in mockall

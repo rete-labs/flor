@@ -7,11 +7,11 @@ use clap::Parser;
 use error_stack::{Report, ResultExt};
 
 use flor::{
-    logging,
-    transport::{
+    core::transport::{
         QuicEndpoint, UdpResolver,
         endpoint::connection::{Accept, Open},
     },
+    logging,
 };
 
 #[derive(Debug, thiserror::Error)]
