@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use error_stack::{Report, bail};
 use quinn::{ConnectionError, RecvStream, SendStream, VarInt, crypto::rustls::HandshakeData};
 
-use crate::transport::Error;
+use crate::core::transport::Error;
 
 /// Trait to inspect connections.
 pub trait Inspect {

@@ -6,7 +6,7 @@ use error_stack::{Report, ResultExt};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::actor::Actor;
-use crate::transport::Error;
+use crate::core::transport::Error;
 
 use super::{QuicEndpoint, connection::QuicConnection};
 
