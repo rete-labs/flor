@@ -1,14 +1,14 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr};
 
 use clap::Parser;
 use error_stack::{Report, ResultExt};
 
 use flor::{
     core::transport::{
-        QuicEndpoint, UdpResolver,
+        QuicEndpoint, TransportModule,
         endpoint::connection::{Accept, Open},
     },
     logging,
@@ -24,6 +24,11 @@ struct Args {
     /// Select node config: Alpha, Beta, or Gamma
     #[arg(long, default_value = "Alpha", value_parser = ["Alpha", "Beta", "Gamma"])]
     name: String,
+}
+
+#[fundle::bundle]
+struct AppModule {
+    transport: TransportModule,
 }
 
 #[tokio::main]
@@ -80,34 +85,14 @@ async fn run() -> Result<(), Report<Error>> {
         served.join(", ")
     );
 
-    // For each service a node hosts, emit (service_name, node_addr)
-    let addr_map: HashMap<String, SocketAddr> = service_map
-        .iter()
-        .flat_map(|(_node, (addr, services))| {
-            services
-                .iter()
-                .map(move |svc| (svc.to_string(), *addr))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let resolver = UdpResolver::new(addr_map);
-
-    // Bind UDP socket
-    let socket = tokio::net::UdpSocket::bind(local_addr)
+    let module = AppModule::builder()
+        .transport_try_async(async |_| TransportModule::new(local_addr, served, &service_map).await)
         .await
-        .change_context(Error("Failed to bind UDP socket".into()))?
-        .into_std()
-        .change_context(Error("Failed to convert UDP socket to std".into()))?;
-
-    let endpoint = QuicEndpoint::new(
-        served.iter().map(|s| s.to_string()).collect(),
-        Arc::new(resolver),
-        socket,
-    )
-    .change_context(Error("Failed to create endpoint".into()))?;
+        .change_context(Error("Failed to build transport bundle".into()))?
+        .build();
 
     let server_handle = tokio::spawn({
-        let ep = endpoint.clone();
+        let ep = module.transport.endpoint.clone();
         async move {
             while let Some((service_name, conn)) = ep.accept().await {
                 tokio::spawn(handle_connection(service_name, conn));
@@ -118,7 +103,7 @@ async fn run() -> Result<(), Report<Error>> {
     // Fire-and-forget client connections; server keeps the process alive
     for (src, dst) in &conn_list {
         if served.contains(src) {
-            let ep = endpoint.clone();
+            let ep = module.transport.endpoint.clone();
             let src = src.to_string();
             let dst = dst.to_string();
             tokio::spawn(async move {

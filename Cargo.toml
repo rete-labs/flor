@@ -13,6 +13,7 @@ clap = { version = "4", features = ["derive"] }
 mockall_double = "0.3"
 env_logger = "0.11"
 error-stack = "0.7"
+fundle = "0.3"
 husky-rs = "0.3"
 log = { version = "0.4", features = ["std"] }
 thiserror = "2.0"

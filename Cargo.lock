@@ -409,6 +409,7 @@ dependencies = [
  "ctor",
  "env_logger",
  "error-stack",
+ "fundle",
  "husky-rs",
  "log",
  "mockall",
@@ -428,6 +429,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8878864ba14bb86e818a412bfd6f18f9eabd4ec0f008a28e8f7eb61db532fcf9"
 dependencies = [
  "futures-core",
+]
+
+[[package]]
+name = "fundle"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1974e44e9f5d0066f15716a16baf6b5e0535f424ef1f1a1454a29eefa6c45a0b"
+dependencies = [
+ "fundle_macros",
+]
+
+[[package]]
+name = "fundle_macros"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca7b7b95658bda376803a96d382167746357af2b95493211180b3622e2b3529b"
+dependencies = [
+ "fundle_macros_impl",
+]
+
+[[package]]
+name = "fundle_macros_impl"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca81ec1ee2d9c602d58a77f8b1a5b4a4e75574570767b396e170ec0d724c4230"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
