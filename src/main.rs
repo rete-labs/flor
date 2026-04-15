@@ -9,7 +9,7 @@ use error_stack::{Report, ResultExt};
 use flor::{
     logging,
     transport::{
-        QuicEndpoint, UdpResolver,
+        QuicConnector, UdpResolver,
         endpoint::connection::{Accept, Open},
     },
 };
@@ -99,30 +99,27 @@ async fn run() -> Result<(), Report<Error>> {
         .into_std()
         .change_context(Error("Failed to convert UDP socket to std".into()))?;
 
-    let endpoint = QuicEndpoint::new(
+    let (connector, mut acceptor) = flor::transport::create_endpoint(
         served.iter().map(|s| s.to_string()).collect(),
         Arc::new(resolver),
         socket,
     )
     .change_context(Error("Failed to create endpoint".into()))?;
 
-    let server_handle = tokio::spawn({
-        let ep = endpoint.clone();
-        async move {
-            while let Some((service_name, conn)) = ep.accept().await {
-                tokio::spawn(handle_connection(service_name, conn));
-            }
+    let server_handle = tokio::spawn(async move {
+        while let Some((service_name, conn)) = acceptor.accept().await {
+            tokio::spawn(handle_connection(service_name, conn));
         }
     });
 
     // Fire-and-forget client connections; server keeps the process alive
     for (src, dst) in &conn_list {
         if served.contains(src) {
-            let ep = endpoint.clone();
+            let connector = connector.clone();
             let src = src.to_string();
             let dst = dst.to_string();
             tokio::spawn(async move {
-                if let Err(e) = initiate_connection(&ep, &src, &dst).await {
+                if let Err(e) = initiate_connection(&connector, &src, &dst).await {
                     log::error!("Connection {}=>{} failed: {:?}", src, dst, e);
                 }
             });
@@ -183,9 +180,13 @@ async fn handle_connection<C: Accept>(service_name: String, conn: C) {
     }
 }
 
-async fn initiate_connection(ep: &QuicEndpoint, src: &str, dst: &str) -> Result<(), Report<Error>> {
+async fn initiate_connection(
+    connector: &QuicConnector,
+    src: &str,
+    dst: &str,
+) -> Result<(), Report<Error>> {
     // Establish connection to destination service
-    let conn = ep
+    let conn = connector
         .connect(dst)
         .await
         .change_context(Error(format!("Failed to connect to {dst}")))?;

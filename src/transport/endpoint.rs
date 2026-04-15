@@ -20,15 +20,18 @@ mod mocks;
 #[double]
 use mocks::Endpoint;
 
+pub mod actor;
+pub use actor::{QuicAcceptor, QuicConnector};
+
 pub mod connection;
 use connection::{Close, Inspect, QuicConnection};
 
 /// QUIC-based Florete Endpoint.
 #[derive(Clone)]
-pub struct QuicEndpoint {
+pub(crate) struct QuicEndpoint {
     endpoint: Endpoint,
     resolver: Arc<dyn Resolver>,
-    served: Vec<String>, // For SNI validation on accept
+    served: Arc<Vec<String>>, // For SNI validation on accept
 }
 
 // Close was caused by the endpoint, either normally or by internal error
@@ -104,7 +107,7 @@ impl QuicEndpoint {
         Ok(Self {
             endpoint,
             resolver,
-            served,
+            served: Arc::new(served),
         })
     }
 
@@ -173,6 +176,14 @@ impl QuicEndpoint {
                 }
             }
         }
+    }
+
+    /// Convert this endpoint into an actor, spawning its task and returning the two handles.
+    ///
+    /// [`QuicConnector`] is cloneable and intended for inbound components.
+    /// [`QuicAcceptor`] is exclusive and intended for the outbound supervisor.
+    pub fn into_actor(self) -> (QuicConnector, QuicAcceptor) {
+        actor::QuicEndpointActor::spawn(self)
     }
 
     /// Close the endpoint, making it to close open connections and to stop accepting new ones.
