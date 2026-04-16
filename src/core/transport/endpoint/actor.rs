@@ -24,6 +24,17 @@ pub(crate) struct ConnectMsg {
 pub struct QuicConnector(mpsc::Sender<ConnectMsg>);
 
 impl QuicConnector {
+    /// Create a connector whose actor side has already shut down.
+    ///
+    /// Every [`connect`](Self::connect) call on the returned instance will fail immediately.
+    /// Useful in tests that verify error-path behaviour without a running QUIC endpoint.
+    #[cfg(test)]
+    pub(crate) fn dead() -> Self {
+        let (tx, _rx) = mpsc::channel::<ConnectMsg>(1);
+        // _rx is intentionally dropped here so that send() always returns an error.
+        Self(tx)
+    }
+
     /// Open a connection to the named service.
     ///
     /// Fails if the actor has shut down or if the underlying QUIC connect fails.
