@@ -15,6 +15,7 @@ use flor::{
         },
     },
     logging,
+    northbound::inbound::socks5::Socks5Inbound,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -44,13 +45,14 @@ async fn run() -> Result<(), Report<Error>> {
     let node_name = args.name;
 
     // Initial version uses workload names instead of identities.
-    // Node configuration: which workloads are hosted at them
+    // Node configuration: (quic_addr, served_workloads, socks5_addr)
     let service_map = HashMap::from([
         (
             "Alpha",
             (
                 "127.0.0.1:31337".parse::<SocketAddr>().unwrap(),
                 vec!["alice"],
+                Some("127.0.0.1:1080".parse::<SocketAddr>().unwrap()),
             ),
         ),
         (
@@ -58,6 +60,7 @@ async fn run() -> Result<(), Report<Error>> {
             (
                 "127.0.0.1:31338".parse::<SocketAddr>().unwrap(),
                 vec!["bob"],
+                None,
             ),
         ),
         (
@@ -65,6 +68,7 @@ async fn run() -> Result<(), Report<Error>> {
             (
                 "127.0.0.1:31339".parse::<SocketAddr>().unwrap(),
                 vec!["carol"],
+                None,
             ),
         ),
     ]);
@@ -72,7 +76,7 @@ async fn run() -> Result<(), Report<Error>> {
     let conn_list = vec![("alice", "bob"), ("carol", "bob")];
 
     // Get current node config
-    let (local_addr, served) = service_map
+    let (local_addr, served, socks5_addr) = service_map
         .get(node_name.as_str())
         .ok_or_else(|| Report::new(Error("Node not found in predefined service map".into())))?;
 
@@ -86,7 +90,7 @@ async fn run() -> Result<(), Report<Error>> {
     // For each service a node hosts, emit (service_name, node_addr)
     let addr_map: HashMap<String, SocketAddr> = service_map
         .iter()
-        .flat_map(|(_node, (addr, services))| {
+        .flat_map(|(_node, (addr, services, _socks5))| {
             services
                 .iter()
                 .map(move |svc| (svc.to_string(), *addr))
@@ -108,6 +112,17 @@ async fn run() -> Result<(), Report<Error>> {
         socket,
     )
     .change_context(Error("Failed to create endpoint".into()))?;
+
+    let _socks5_handle = if let Some(socks5_addr) = socks5_addr {
+        let handle = Socks5Inbound::new(*socks5_addr, connector.clone())
+            .await
+            .change_context(Error("Failed to create SOCKS5 inbound".into()))?
+            .spawn();
+        log::info!("SOCKS5 server listening on {socks5_addr}");
+        Some(handle)
+    } else {
+        None
+    };
 
     let server_handle = tokio::spawn(async move {
         while let Some((service_name, conn)) = acceptor.accept().await {
