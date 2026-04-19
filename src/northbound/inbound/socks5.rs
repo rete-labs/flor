@@ -150,9 +150,7 @@ async fn handle_socks5(stream: TcpStream, connector: QuicConnector) -> Result<()
         Err(e) => {
             // Ignore errors replying here since we're already in an error path.
             let _ = proto.reply_error(&ReplyError::HostUnreachable).await;
-            bail!(
-                e.change_context(Error(format!("Failed to connect to '{target}'")))
-            );
+            bail!(e.change_context(Error(format!("Failed to connect to '{target}'"))));
         }
     };
 
