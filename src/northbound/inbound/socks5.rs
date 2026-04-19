@@ -1,22 +1,79 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
+use async_trait::async_trait;
 use error_stack::{FutureExt, IntoReport, Report, ResultExt, bail};
 use fast_socks5::server::Socks5ServerProtocol;
 use fast_socks5::util::target_addr::TargetAddr;
 use fast_socks5::{ReplyError, Socks5Command};
 use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::core::transport::QuicConnector;
-use crate::core::transport::endpoint::connection::Open;
 
 const LOG_TARGET: &str = "socks5_inbound";
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct Error(String);
+
+/// Abstraction over the QUIC backend used by [`handle_socks5`].
+///
+/// The production implementation wraps [`QuicConnector`].
+/// Tests substitute a lightweight in-process mock.
+#[async_trait]
+trait QuicBackend: Send + Sync {
+    async fn open_stream(
+        &self,
+        target: &str,
+    ) -> Result<
+        (
+            Box<dyn AsyncWrite + Unpin + Send>,
+            Box<dyn AsyncRead + Unpin + Send>,
+        ),
+        Report<BackendError>,
+    >;
+}
+
+#[derive(Debug, thiserror::Error)]
+enum BackendError {
+    #[error("connect failed")]
+    ConnectFailed,
+    #[error("stream open failed")]
+    OpenStreamFailed,
+}
+
+#[async_trait]
+impl QuicBackend for QuicConnector {
+    async fn open_stream(
+        &self,
+        target: &str,
+    ) -> Result<
+        (
+            Box<dyn AsyncWrite + Unpin + Send>,
+            Box<dyn AsyncRead + Unpin + Send>,
+        ),
+        Report<BackendError>,
+    > {
+        use crate::core::transport::endpoint::connection::Open;
+
+        let conn = self
+            .connect(target)
+            .await
+            .change_context(BackendError::ConnectFailed)?;
+
+        let (send, recv) = conn
+            .open_bi()
+            .await
+            .map_err(|e| e.into_report())
+            .change_context(BackendError::OpenStreamFailed)?;
+
+        Ok((Box::new(send), Box::new(recv)))
+    }
+}
 
 /// Lifecycle handle for a running [`Socks5Inbound`].
 ///
@@ -53,7 +110,7 @@ impl Drop for Socks5Handle {
 /// Dropping the handle stops the accept loop.
 pub struct Socks5Inbound {
     listener: TcpListener,
-    connector: QuicConnector,
+    backend: Arc<dyn QuicBackend>,
 }
 
 impl Socks5Inbound {
@@ -69,7 +126,7 @@ impl Socks5Inbound {
             })?;
         Ok(Self {
             listener,
-            connector,
+            backend: Arc::new(connector),
         })
     }
 
@@ -87,9 +144,9 @@ impl Socks5Inbound {
                 result = self.listener.accept() => match result {
                     Ok((stream, peer_addr)) => {
                         log::debug!(target: LOG_TARGET, "Accepted connection from {peer_addr}");
-                        let connector = self.connector.clone();
+                        let backend = self.backend.clone();
                         tasks.spawn(async move {
-                            if let Err(e) = handle_socks5(stream, connector).await {
+                            if let Err(e) = handle_socks5(stream, backend).await {
                                 log::warn!(target: LOG_TARGET,
                                     "Connection from {peer_addr} error: {e:?}");
                             }
@@ -111,7 +168,10 @@ impl Socks5Inbound {
 
 /// Handles a single SOCKS5 connection: performs the handshake, opens connection to the target,
 /// then relays traffic between the client and the target until either side closes.
-async fn handle_socks5(stream: TcpStream, connector: QuicConnector) -> Result<(), Report<Error>> {
+async fn handle_socks5(
+    stream: TcpStream,
+    backend: Arc<dyn QuicBackend>,
+) -> Result<(), Report<Error>> {
     // Step 1: SOCKS5 handshake.
     let proto = Socks5ServerProtocol::accept_no_auth(stream)
         .change_context(Error("SOCKS5 handshake failed".into()))
@@ -144,30 +204,20 @@ async fn handle_socks5(stream: TcpStream, connector: QuicConnector) -> Result<()
         }
     };
 
-    // Step 4: Open QUIC connection to the target.
-    let quic_conn = match connector.connect(&target).await {
-        Ok(conn) => conn,
-        Err(e) => {
-            // Ignore errors replying here since we're already in an error path.
-            let _ = proto.reply_error(&ReplyError::HostUnreachable).await;
-            bail!(e.change_context(Error(format!("Failed to connect to '{target}'"))));
-        }
-    };
-
-    // Step 5: Open a bidirectional QUIC stream.
-    let (mut quic_send, mut quic_recv) = match quic_conn.open_bi().await {
+    // Step 4: Open QUIC connection and bidirectional stream to the target.
+    let (mut quic_send, mut quic_recv) = match backend.open_stream(&target).await {
         Ok(streams) => streams,
         Err(e) => {
-            // Ignore errors replying here since we're already in an error path.
-            let _ = proto.reply_error(&ReplyError::GeneralFailure).await;
-            bail!(
-                e.into_report()
-                    .change_context(Error(format!("Failed to open QUIC stream to '{target}'")))
-            );
+            let reply = match e.current_context() {
+                BackendError::ConnectFailed => ReplyError::HostUnreachable,
+                BackendError::OpenStreamFailed => ReplyError::GeneralFailure,
+            };
+            let _ = proto.reply_error(&reply).await;
+            bail!(e.change_context(Error(format!("Backend failure for '{target}'"))))
         }
     };
 
-    // Step 6: Reply SOCKS5 success and start relaying traffic.
+    // Step 5: Reply SOCKS5 success and start relaying traffic.
     // Use a standard address placeholder since we don't have a real local bind address for this
     // connection and it's not actually used by almost all SOCKS5 clients.
     let bind_addr = "0.0.0.0:0".parse::<SocketAddr>().unwrap();
@@ -201,18 +251,25 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
+    use tokio::sync::Mutex;
 
-    /// Find an available TCP port on localhost.
-    async fn free_addr() -> SocketAddr {
-        TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap()
-            .local_addr()
-            .unwrap()
+    // --- Test helpers ---
+
+    async fn bound_listener() -> (TcpListener, SocketAddr) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        (listener, addr)
+    }
+
+    fn inbound(listener: TcpListener, backend: impl QuicBackend + 'static) -> Socks5Inbound {
+        Socks5Inbound {
+            listener,
+            backend: Arc::new(backend),
+        }
     }
 
     /// Perform the SOCKS5 greeting + TCP_CONNECT handshake up to (but not including)
-    /// the server's connect reply. Returns the stream ready to read the reply.
+    /// the server's connect reply.
     async fn socks5_connect(stream: &mut TcpStream, target: &str, port: u16) {
         // Client greeting: version=5, nmethods=1, method=0 (no-auth)
         stream.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
@@ -243,32 +300,87 @@ mod tests {
         stream.write_all(b"localhost\x00\x50").await.unwrap();
     }
 
-    fn dead_connector() -> QuicConnector {
-        QuicConnector::dead()
+    /// Backend that always fails at the connect step.
+    struct MockFailingQuicBackend;
+
+    #[async_trait]
+    impl QuicBackend for MockFailingQuicBackend {
+        async fn open_stream(
+            &self,
+            _target: &str,
+        ) -> Result<
+            (
+                Box<dyn AsyncWrite + Unpin + Send>,
+                Box<dyn AsyncRead + Unpin + Send>,
+            ),
+            Report<BackendError>,
+        > {
+            Err(Report::new(BackendError::ConnectFailed))
+        }
     }
+
+    /// Backend that returns one side of a `tokio::io::duplex` pair.
+    ///
+    /// The test holds the other side and uses it to simulate a QUIC peer:
+    /// writes appear as `quic_recv` data (client reads them), and
+    /// data the client sends arrives as reads on the test side.
+    struct MockConnectedQuicBackend {
+        stream: Mutex<Option<tokio::io::DuplexStream>>,
+    }
+
+    impl MockConnectedQuicBackend {
+        fn new_pair() -> (Self, tokio::io::DuplexStream) {
+            let (server_side, test_side) = tokio::io::duplex(65536);
+            (
+                Self {
+                    stream: Mutex::new(Some(server_side)),
+                },
+                test_side,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl QuicBackend for MockConnectedQuicBackend {
+        async fn open_stream(
+            &self,
+            _target: &str,
+        ) -> Result<
+            (
+                Box<dyn AsyncWrite + Unpin + Send>,
+                Box<dyn AsyncRead + Unpin + Send>,
+            ),
+            Report<BackendError>,
+        > {
+            let stream = self
+                .stream
+                .lock()
+                .await
+                .take()
+                .expect("stream already consumed");
+            let (read_half, write_half) = tokio::io::split(stream);
+            Ok((Box::new(write_half), Box::new(read_half)))
+        }
+    }
+
+    // --- Tests ---
 
     #[tokio::test]
     async fn test_actor_binds_and_accepts() {
-        let addr = free_addr().await;
-        let connector = dead_connector();
-        let inbound = Socks5Inbound::new(addr, connector).await.unwrap();
-        let _handle = inbound.spawn();
+        let (listener, addr) = bound_listener().await;
+        let _handle = inbound(listener, MockFailingQuicBackend).spawn();
 
-        // A plain TCP connect should succeed
         TcpStream::connect(addr).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_unsupported_command_gets_reply() {
-        let addr = free_addr().await;
-        let connector = dead_connector();
-        let inbound = Socks5Inbound::new(addr, connector).await.unwrap();
-        let _handle = inbound.spawn();
+        let (listener, addr) = bound_listener().await;
+        let _handle = inbound(listener, MockFailingQuicBackend).spawn();
 
         let mut client = TcpStream::connect(addr).await.unwrap();
         socks5_bind(&mut client).await;
 
-        // Server must reply with CommandNotSupported (0x07) or close
         let mut reply = [0u8; 10];
         let n = tokio::time::timeout(Duration::from_secs(2), client.read(&mut reply))
             .await
@@ -281,10 +393,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_ip_target_gets_addr_type_not_supported() {
-        let addr = free_addr().await;
-        let connector = dead_connector();
-        let inbound = Socks5Inbound::new(addr, connector).await.unwrap();
-        let _handle = inbound.spawn();
+        let (listener, addr) = bound_listener().await;
+        let _handle = inbound(listener, MockFailingQuicBackend).spawn();
 
         let mut client = TcpStream::connect(addr).await.unwrap();
 
@@ -310,11 +420,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_quic_connect_failure_gets_general_failure() {
-        let addr = free_addr().await;
-        let connector = dead_connector(); // connector always fails
-        let inbound = Socks5Inbound::new(addr, connector).await.unwrap();
-        let _handle = inbound.spawn();
+    async fn test_backend_failure_gets_host_unreachable() {
+        let (listener, addr) = bound_listener().await;
+        let _handle = inbound(listener, MockFailingQuicBackend).spawn();
 
         let mut client = TcpStream::connect(addr).await.unwrap();
         socks5_connect(&mut client, "some-service", 80).await;
@@ -331,10 +439,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_dropped_stops_actor() {
-        let addr = free_addr().await;
-        let connector = dead_connector();
-        let inbound = Socks5Inbound::new(addr, connector).await.unwrap();
-        let handle = inbound.spawn();
+        let (listener, addr) = bound_listener().await;
+        let handle = inbound(listener, MockFailingQuicBackend).spawn();
 
         // Actor is running — connection should succeed
         TcpStream::connect(addr).await.unwrap();
@@ -348,5 +454,46 @@ mod tests {
             result.is_err() || result.unwrap().is_err(),
             "connections should fail after shutdown"
         );
+    }
+
+    #[tokio::test]
+    async fn test_happy_path_relay() {
+        let (backend, mut backend_stream) = MockConnectedQuicBackend::new_pair();
+        let (listener, addr) = bound_listener().await;
+        let _handle = inbound(listener, backend).spawn();
+
+        // Connect as SOCKS5 client and complete the handshake
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        socks5_connect(&mut client, "some-service", 80).await;
+
+        // Read SOCKS5 success reply (10 bytes: ver, rep, rsv, atyp, 4-byte addr, 2-byte port)
+        let mut reply = [0u8; 10];
+        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut reply))
+            .await
+            .expect("timeout waiting for SOCKS5 reply")
+            .expect("read error");
+        assert_eq!(reply[0], 0x05);
+        assert_eq!(reply[1], 0x00, "expected success");
+
+        // Backend → client direction
+        backend_stream
+            .write_all(b"hello from backend")
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 18];
+        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut buf))
+            .await
+            .expect("timeout")
+            .unwrap();
+        assert_eq!(&buf, b"hello from backend");
+
+        // Client → backend direction
+        client.write_all(b"hello from client").await.unwrap();
+        let mut buf = vec![0u8; 17];
+        tokio::time::timeout(Duration::from_secs(2), backend_stream.read_exact(&mut buf))
+            .await
+            .expect("timeout")
+            .unwrap();
+        assert_eq!(&buf, b"hello from client");
     }
 }
