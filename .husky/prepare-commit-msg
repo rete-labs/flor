@@ -6,8 +6,14 @@ SHA1="$3"
 
 TEMPLATE_HEADER_LINE="# <type>[!][(<scope>)]: <summary> (<issue-ref>)"
 
-# Do nothing for merge/squash, amend or rebase.
+# Do nothing for merge/squash or amend.
 if [[ "$COMMIT_SOURCE" == "merge" || "$COMMIT_SOURCE" == "squash" || -n "$SHA1" ]]; then
+  exit 0
+fi
+
+# Do nothing while rebase is in progress.
+GIT_DIR="$(git rev-parse --git-dir 2>/dev/null || true)"
+if [[ -n "$GIT_DIR" && ( -d "$GIT_DIR/rebase-merge" || -d "$GIT_DIR/rebase-apply" ) ]]; then
   exit 0
 fi
 
@@ -39,6 +45,7 @@ CONTENT="$(cat "$COMMIT_MSG_FILE")"
 
   # Add template if not already present
   if ! has_template; then
+    echo ""
     echo "# Message template:"
     echo "$TEMPLATE_HEADER_LINE"
     echo "#"
@@ -47,4 +54,3 @@ CONTENT="$(cat "$COMMIT_MSG_FILE")"
     echo "# [optional footer]"
   fi
 } > "$COMMIT_MSG_FILE"
-
