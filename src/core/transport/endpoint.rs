@@ -21,17 +21,25 @@ mod mocks;
 use mocks::Endpoint;
 
 pub mod actor;
-pub use actor::{QuicAcceptor, QuicConnector};
+pub use actor::{QuicAcceptor, QuicConnector, QuicHandle, QuicPublisher};
 
 pub mod connection;
 use connection::{Close, Inspect, QuicConnection};
 
+/// Validates whether an incoming connection's requested service name is currently served.
+///
+/// Implemented by the actor layer and injected into [`QuicEndpoint`] at spawn time, keeping
+/// the endpoint decoupled from subscriber-management details.
+trait ServiceValidator: Send + Sync {
+    fn is_served(&self, service: &str) -> bool;
+}
+
 /// QUIC-based Florete Endpoint.
 #[derive(Clone)]
-pub(crate) struct QuicEndpoint {
+struct QuicEndpoint {
     endpoint: Endpoint,
     resolver: Arc<dyn Resolver>,
-    served: Arc<Vec<String>>, // For SNI validation on accept
+    validator: Arc<dyn ServiceValidator>,
 }
 
 // Close was caused by the endpoint, either normally or by internal error
@@ -42,28 +50,29 @@ const CLIENT_ERROR_CODE: u32 = 1;
 const FLOR_ALPN: &str = "flor/1";
 
 impl QuicEndpoint {
-    /// Create new QUIC endpoint that serves specified services, uses provided resolver for outgoing
-    /// connections and works over UDP socket.
-    pub fn new(
-        served: Vec<String>,
+    /// Create new QUIC endpoint, uses provided resolver for outgoing connections and works over
+    /// UDP socket. The served service list is managed dynamically via [`ServiceValidator`],
+    /// injected at actor spawn time.
+    fn new(
         resolver: Arc<dyn Resolver>,
         socket: std::net::UdpSocket,
+        validator: Arc<dyn ServiceValidator>,
     ) -> Result<Self, Report<Error>> {
         let runtime = quinn::default_runtime()
             .ok_or_else(|| Error("Failed to get default async runtime".into()))?;
         let async_socket = runtime
             .wrap_udp_socket(socket)
             .change_context(Error("Failed to wrap UDP socket".into()))?;
-        Self::new_with_abstract_socket(served, resolver, runtime, async_socket)
+        Self::new_with_abstract_socket(resolver, runtime, async_socket, validator)
     }
 
     /// Create new QUIC endpoint that works over quinn's abstract socket and runtime.
     /// This constructor allows using custom UDP-like sockets.
     pub fn new_with_abstract_socket(
-        served: Vec<String>,
         resolver: Arc<dyn Resolver>,
         runtime: Arc<dyn quinn::Runtime>,
         socket: Arc<dyn quinn::AsyncUdpSocket>,
+        validator: Arc<dyn ServiceValidator>,
     ) -> Result<Self, Report<Error>> {
         // Current impl: single self-signed cert + SNI routing in `accept`.
         // TODO(#5): replace with SNI routing in certificate provider, when integrating Identity
@@ -107,12 +116,12 @@ impl QuicEndpoint {
         Ok(Self {
             endpoint,
             resolver,
-            served: Arc::new(served),
+            validator,
         })
     }
 
     /// Connect to the specified service.
-    pub async fn connect(&self, connect_to: &str) -> Result<QuicConnection, Report<Error>> {
+    async fn connect(&self, connect_to: &str) -> Result<QuicConnection, Report<Error>> {
         let dest_addr = self.resolver.resolve(connect_to).await?;
         let conn_error = || Error(format!("Failed to connect to {connect_to}"));
         self.endpoint
@@ -129,7 +138,7 @@ impl QuicEndpoint {
     /// Transient errors (e.g., handshake failures, unknown SNI, etc) are logged at `debug` level
     /// and ignored: the endpoint continues accepting.
     /// Only unrecoverable errors cause `None` return.
-    pub async fn accept(&self) -> Option<(String, QuicConnection)> {
+    async fn accept(&self) -> Option<(String, QuicConnection)> {
         loop {
             // Wait for an incoming connection attempt
             let conn_fut = match self.endpoint.accept().await {
@@ -178,16 +187,8 @@ impl QuicEndpoint {
         }
     }
 
-    /// Convert this endpoint into an actor, spawning its task and returning the two handles.
-    ///
-    /// [`QuicConnector`] is cloneable and intended for inbound components.
-    /// [`QuicAcceptor`] is exclusive and intended for the outbound supervisor.
-    pub fn into_actor(self) -> (QuicConnector, QuicAcceptor) {
-        actor::QuicEndpointActor::spawn(self)
-    }
-
     /// Close the endpoint, making it to close open connections and to stop accepting new ones.
-    pub fn close(&self) {
+    fn close(&self) {
         self.endpoint
             .close(VarInt::from_u32(ENDPOINT_CLOSE_CODE), b"endpoint-closed");
     }
@@ -205,12 +206,8 @@ impl QuicEndpoint {
                 }
             })?;
 
-        // Validate that the requested service is one we serve
-        if !self.served.contains(&service_name) {
-            log::debug!(
-                "Connection to unknown service '{service_name}', rejecting; served: {:?}",
-                self.served
-            );
+        if !self.validator.is_served(&service_name) {
+            log::debug!("Connection to unknown service '{service_name}', rejecting");
             return Err(ValidationError::Reject {
                 reason: b"unknown-service",
             });
@@ -234,8 +231,17 @@ mod test {
     // We need to serialize tests because of global mocks for static functions in mockall
     use serial_test::serial;
 
+    struct TestValidator(Vec<String>);
+
+    impl ServiceValidator for TestValidator {
+        fn is_served(&self, service: &str) -> bool {
+            self.0.iter().any(|s| s == service)
+        }
+    }
+
     /// Core setup: creates mock context, socket, runtime, and attempts construction.
     fn setup_endpoint_creation(
+        validator: Arc<dyn ServiceValidator>,
         mut mock_setup: impl FnMut() -> std::io::Result<MockEndpoint> + Send + 'static,
     ) -> Result<QuicEndpoint, Report<Error>> {
         let ctx = MockEndpoint::new_with_abstract_socket_context();
@@ -244,19 +250,23 @@ mod test {
         let sock = Arc::new(MockAsyncUdpSocket::new());
         let runtime = Arc::new(MockRuntime::new());
         QuicEndpoint::new_with_abstract_socket(
-            vec!["test_service".into()],
             Arc::new(MockResolver::new()),
             runtime,
             sock,
+            validator,
         )
     }
 
     /// Convenience wrapper for tests that need a successfully created endpoint
     /// with custom `accept()` behavior.
+    ///
+    /// Injects a [`TestValidator`] that recognises `"test_service"`, matching the
+    /// service name used across the validate_connection tests.
     fn setup_endpoint_for_accept(
         mut configure_accept: impl FnMut(&mut MockEndpoint) + Send + 'static,
     ) -> QuicEndpoint {
-        setup_endpoint_creation(move || {
+        let validator = Arc::new(TestValidator(vec!["test_service".into()]));
+        setup_endpoint_creation(validator, move || {
             let mut mock = MockEndpoint::new();
             mock.expect_set_default_client_config()
                 .times(1)
@@ -279,7 +289,7 @@ mod test {
     #[test]
     #[serial]
     fn test_failure_to_create_quinn_endpoint() {
-        let res = setup_endpoint_creation(|| {
+        let res = setup_endpoint_creation(Arc::new(TestValidator(vec![])), || {
             Err(std::io::Error::new(
                 std::io::ErrorKind::AddrInUse,
                 "Mock IO error",

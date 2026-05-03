@@ -1,21 +1,20 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr};
 
 use clap::Parser;
 use error_stack::{Report, ResultExt};
 
 use flor::{
-    core::{
-        self,
-        transport::{
-            QuicConnector, UdpResolver,
-            endpoint::connection::{Accept, Open},
-        },
+    AddrMap, AppConfigBundle, EndpointAddr, Socks5Addr,
+    core::transport::{
+        QuicConnector, TransportBundle,
+        endpoint::connection::{Accept, Open},
     },
     logging,
-    northbound::inbound::socks5::Socks5Inbound,
+    northbound::inbound::{Error as InboundError, InboundBundle},
+    utils::report::ErrorReport,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +27,15 @@ struct Args {
     /// Select node config: Alpha, Beta, or Gamma
     #[arg(long, default_value = "Alpha", value_parser = ["Alpha", "Beta", "Gamma"])]
     name: String,
+}
+
+#[fundle::bundle]
+struct AppBundle {
+    #[forward(EndpointAddr, AddrMap, Option<Socks5Addr>)]
+    pub config: AppConfigBundle,
+    #[forward(QuicConnector)]
+    pub transport: TransportBundle,
+    pub inbound: InboundBundle,
 }
 
 #[tokio::main]
@@ -97,34 +105,30 @@ async fn run() -> Result<(), Report<Error>> {
                 .collect::<Vec<_>>()
         })
         .collect();
-    let resolver = UdpResolver::new(addr_map);
 
-    // Bind UDP socket
-    let socket = tokio::net::UdpSocket::bind(local_addr)
+    let served_names: Vec<String> = served.iter().map(|s| s.to_string()).collect();
+
+    let bundle_err = || Error("Failed to build app bundle".into());
+    let app: AppBundle = AppBundle::builder()
+        .config(|_| AppConfigBundle {
+            endpoint_addr: EndpointAddr(*local_addr),
+            addr_map: AddrMap(addr_map.clone()),
+            socks5_addr: socks5_addr.map(Socks5Addr),
+        })
+        .transport_try(|b| TransportBundle::try_new(b))
+        .change_context_lazy(bundle_err)?
+        .inbound_try_async(init_inbound)
         .await
-        .change_context(Error("Failed to bind UDP socket".into()))?
-        .into_std()
-        .change_context(Error("Failed to convert UDP socket to std".into()))?;
+        .change_context_lazy(bundle_err)?
+        .build();
 
-    let (connector, mut acceptor) = core::transport::create_endpoint(
-        served.iter().map(|s| s.to_string()).collect(),
-        Arc::new(resolver),
-        socket,
-    )
-    .change_context(Error("Failed to create endpoint".into()))?;
-
-    let _socks5_handle = if let Some(socks5_addr) = socks5_addr {
-        let handle = Socks5Inbound::new(*socks5_addr, connector.clone())
-            .await
-            .change_context(Error("Failed to create SOCKS5 inbound".into()))?
-            .spawn();
-        log::info!("SOCKS5 server listening on {socks5_addr}");
-        Some(handle)
-    } else {
-        None
-    };
-
-    let server_handle = tokio::spawn(async move {
+    let mut acceptor = app
+        .transport
+        .endpoint_publisher
+        .publish(served_names.clone())
+        .await
+        .change_context(Error("Failed to publish served services".into()))?;
+    let acceptor_handle = tokio::spawn(async move {
         while let Some((service_name, conn)) = acceptor.accept().await {
             tokio::spawn(handle_connection(service_name, conn));
         }
@@ -132,8 +136,8 @@ async fn run() -> Result<(), Report<Error>> {
 
     // Fire-and-forget client connections; server keeps the process alive
     for (src, dst) in &conn_list {
-        if served.contains(src) {
-            let connector = connector.clone();
+        if served_names.contains(&src.to_string()) {
+            let connector = app.transport.endpoint_connector.clone();
             let src = src.to_string();
             let dst = dst.to_string();
             tokio::spawn(async move {
@@ -144,7 +148,31 @@ async fn run() -> Result<(), Report<Error>> {
         }
     }
 
-    let _ = server_handle.await;
+    let endpoint_handle = app.transport.endpoint_handle;
+    let socks5_handle = app.inbound.socks5_handle;
+
+    tokio::select! {
+        result = acceptor_handle => {
+            if let Err(e) = result {
+                log::error!("Acceptor task failed: {e:?}");
+            }
+        }
+        result = endpoint_handle.wait() => {
+            if let Err(e) = result {
+                log::error!("Endpoint actor task failed: {e:?}");
+            }
+        }
+        result = async {
+            match socks5_handle {
+                Some(h) => h.wait().await,
+                None => std::future::pending().await,
+            }
+        } => {
+            if let Err(e) = result {
+                log::error!("Socks5 task failed: {e:?}");
+            }
+        }
+    }
 
     Ok(())
 }
@@ -244,4 +272,11 @@ async fn initiate_connection(
     }
     // Connection will be closed on Drop
     Ok(())
+}
+
+// Workaround to avoid rust-analyzer issue with async closures.
+async fn init_inbound(
+    b: &AppBundleBuilder<fundle::Read, fundle::Set, fundle::Set, fundle::NotSet>,
+) -> Result<InboundBundle, ErrorReport<InboundError>> {
+    InboundBundle::try_new(b).await
 }

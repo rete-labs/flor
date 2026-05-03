@@ -13,6 +13,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::core::transport::QuicConnector;
+use crate::impl_lifecycle_handle;
+use crate::utils::lifecycle::LifecycleHandle;
 
 const LOG_TARGET: &str = "socks5_inbound";
 
@@ -80,23 +82,9 @@ impl QuicBackend for QuicConnector {
 /// Dropping this handle aborts the accept loop and all in-flight connections.
 /// Call [`shutdown`](Self::shutdown) to also await full termination of the accept
 /// loop task.
-pub struct Socks5Handle {
-    join: JoinHandle<()>,
-}
+pub struct Socks5Handle(LifecycleHandle);
 
-impl Socks5Handle {
-    /// Abort the accept loop and wait for the task to finish.
-    pub async fn shutdown(mut self) {
-        self.join.abort();
-        let _ = (&mut self.join).await;
-    }
-}
-
-impl Drop for Socks5Handle {
-    fn drop(&mut self) {
-        self.join.abort();
-    }
-}
+impl_lifecycle_handle!(Socks5Handle);
 
 /// SOCKS5 inbound component.
 ///
@@ -132,9 +120,7 @@ impl Socks5Inbound {
 
     /// Start the accept loop, returning a [`Socks5Handle`] that controls its lifetime.
     pub fn spawn(self) -> Socks5Handle {
-        Socks5Handle {
-            join: tokio::spawn(self.run()),
-        }
+        Socks5Handle::new(tokio::spawn(self.run()))
     }
 
     async fn run(self) {
@@ -446,7 +432,7 @@ mod tests {
         TcpStream::connect(addr).await.unwrap();
 
         // Drop handle — actor shuts down
-        handle.shutdown().await;
+        let _ = handle.shutdown().await;
 
         // New connections should be refused now
         let result = tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(addr)).await;
