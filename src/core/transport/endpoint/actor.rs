@@ -1,14 +1,12 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::RwLock,
-};
+use std::collections::{HashMap, HashSet};
 
+use async_trait::async_trait;
 use error_stack::{IntoReport, Report, ResultExt};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{RwLock, mpsc, oneshot},
     task::JoinHandle,
 };
 
@@ -31,24 +29,25 @@ impl SharedServiceRegistry {
         Arc::new(Self(RwLock::new(HashSet::new())))
     }
 
-    fn register(&self, services: &[String]) {
-        let mut set = self.0.write().unwrap();
+    async fn register(&self, services: &[String]) {
+        let mut set = self.0.write().await;
         for s in services {
             set.insert(s.clone());
         }
     }
 
-    fn unregister<'a>(&self, services: impl Iterator<Item = &'a String>) {
-        let mut set = self.0.write().unwrap();
+    async fn unregister<'a>(&self, services: impl Iterator<Item = &'a String>) {
+        let mut set = self.0.write().await;
         for s in services {
             set.remove(s.as_str());
         }
     }
 }
 
+#[async_trait]
 impl ServiceValidator for SharedServiceRegistry {
-    fn is_served(&self, service: &str) -> bool {
-        self.0.read().unwrap().contains(service)
+    async fn is_served(&self, service: &str) -> bool {
+        self.0.read().await.contains(service)
     }
 }
 
@@ -190,21 +189,21 @@ impl QuicEndpointActor {
         let _ = msg.reply.send(result);
     }
 
-    fn cleanup_stale(&mut self) {
+    async fn cleanup_stale(&mut self) {
         let stale: Vec<String> = self
             .subscribers
             .iter()
             .filter(|(_, tx)| tx.is_closed())
             .map(|(svc, _)| svc.clone())
             .collect();
-        self.registry.unregister(stale.iter());
+        self.registry.unregister(stale.iter()).await;
         for svc in stale {
             self.subscribers.remove(&svc);
         }
     }
 
-    fn handle_publish(&mut self, msg: PublishMsg) {
-        self.cleanup_stale();
+    async fn handle_publish(&mut self, msg: PublishMsg) {
+        self.cleanup_stale().await;
 
         let conflicting: Vec<&str> = msg
             .served
@@ -226,7 +225,7 @@ impl QuicEndpointActor {
         for service in &msg.served {
             self.subscribers.insert(service.clone(), tx.clone());
         }
-        self.registry.register(&msg.served);
+        self.registry.register(&msg.served).await;
         let _ = msg.reply.send(Ok(rx));
     }
 
@@ -238,7 +237,7 @@ impl QuicEndpointActor {
                     log::debug!(
                         "QuicEndpointActor: subscriber for '{service_name}' dropped, cleaning up"
                     );
-                    self.cleanup_stale();
+                    self.cleanup_stale().await;
                 }
             }
             None => {
@@ -260,7 +259,7 @@ impl QuicEndpointActor {
                     self.handle_connect(msg).await;
                 },
                 Some(msg) = publish_rx.recv() => {
-                    self.handle_publish(msg);
+                    self.handle_publish(msg).await;
                 },
                 accepted = self.endpoint.accept() => match accepted {
                     Some((service_name, conn)) => {
@@ -321,35 +320,37 @@ mod test {
         }
     }
 
-    fn do_publish(actor: &mut QuicEndpointActor, services: Vec<&str>) -> PublishResult {
+    async fn do_publish(actor: &mut QuicEndpointActor, services: Vec<&str>) -> PublishResult {
         let (tx, mut rx) = oneshot::channel();
-        actor.handle_publish(PublishMsg {
-            served: services.into_iter().map(str::to_string).collect(),
-            reply: tx,
-        });
+        actor
+            .handle_publish(PublishMsg {
+                served: services.into_iter().map(str::to_string).collect(),
+                reply: tx,
+            })
+            .await;
         rx.try_recv()
             .expect("handle_publish must send a reply synchronously")
     }
 
     // --- handle_publish tests ---
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn test_publish_registers_new_services() {
+    async fn test_publish_registers_new_services() {
         let mut actor = make_actor();
 
-        let result = do_publish(&mut actor, vec!["svc1", "svc2"]);
+        let result = do_publish(&mut actor, vec!["svc1", "svc2"]).await;
 
         assert!(result.is_ok());
         assert!(actor.subscribers.contains_key("svc1"));
         assert!(actor.subscribers.contains_key("svc2"));
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn test_publish_single_service_shares_channel_across_names() {
+    async fn test_publish_single_service_shares_channel_across_names() {
         let mut actor = make_actor();
-        let result = do_publish(&mut actor, vec!["svc1", "svc2"]);
+        let result = do_publish(&mut actor, vec!["svc1", "svc2"]).await;
 
         let rx = result.expect("publish failed");
         // Both service names map to senders on the same channel.
@@ -363,29 +364,33 @@ mod test {
         assert!(tx2.is_closed());
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn test_publish_conflict_returns_error_naming_service() {
+    async fn test_publish_conflict_returns_error_naming_service() {
         let mut actor = make_actor();
 
-        let _sub = do_publish(&mut actor, vec!["svc1"]).expect("first publish failed");
+        let _sub = do_publish(&mut actor, vec!["svc1"])
+            .await
+            .expect("first publish failed");
 
-        let err = do_publish(&mut actor, vec!["svc1"]).unwrap_err();
+        let err = do_publish(&mut actor, vec!["svc1"]).await.unwrap_err();
         assert!(
             err.to_string().contains("svc1"),
             "error must name the conflicting service; got: {err}"
         );
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn test_publish_partial_conflict_is_atomic() {
+    async fn test_publish_partial_conflict_is_atomic() {
         let mut actor = make_actor();
 
-        let _sub = do_publish(&mut actor, vec!["svc1"]).expect("setup failed");
+        let _sub = do_publish(&mut actor, vec!["svc1"])
+            .await
+            .expect("setup failed");
 
         // svc1 conflicts, svc2 is new — the whole publish must be rejected.
-        let result = do_publish(&mut actor, vec!["svc1", "svc2"]);
+        let result = do_publish(&mut actor, vec!["svc1", "svc2"]).await;
         assert!(result.is_err(), "publish with a conflict must fail");
         assert!(
             !actor.subscribers.contains_key("svc2"),
@@ -393,15 +398,17 @@ mod test {
         );
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn test_publish_allows_reregister_after_subscriber_drops() {
+    async fn test_publish_allows_reregister_after_subscriber_drops() {
         let mut actor = make_actor();
 
-        let sub = do_publish(&mut actor, vec!["svc1"]).expect("first publish failed");
+        let sub = do_publish(&mut actor, vec!["svc1"])
+            .await
+            .expect("first publish failed");
         drop(sub); // simulate subscriber dropping its QuicAcceptor
 
-        let result = do_publish(&mut actor, vec!["svc1"]);
+        let result = do_publish(&mut actor, vec!["svc1"]).await;
         assert!(
             result.is_ok(),
             "should succeed after stale subscriber is cleaned up"

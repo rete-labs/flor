@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use error_stack::{Report, ResultExt};
 use mockall_double::double;
 use quinn::{
@@ -30,8 +31,9 @@ use connection::{Close, Inspect, QuicConnection};
 ///
 /// Implemented by the actor layer and injected into [`QuicEndpoint`] at spawn time, keeping
 /// the endpoint decoupled from subscriber-management details.
+#[async_trait]
 trait ServiceValidator: Send + Sync {
-    fn is_served(&self, service: &str) -> bool;
+    async fn is_served(&self, service: &str) -> bool;
 }
 
 /// QUIC-based Florete Endpoint.
@@ -169,7 +171,7 @@ impl QuicEndpoint {
 
             let conn = QuicConnection::new(conn);
 
-            match self.validate_connection(&conn) {
+            match self.validate_connection(&conn).await {
                 Ok(service_name) => {
                     log::debug!("Accepted connection for service '{service_name}'");
                     return Some((service_name, conn));
@@ -193,7 +195,7 @@ impl QuicEndpoint {
             .close(VarInt::from_u32(ENDPOINT_CLOSE_CODE), b"endpoint-closed");
     }
 
-    fn validate_connection<C: Inspect>(&self, conn: &C) -> Result<String, ValidationError> {
+    async fn validate_connection<C: Inspect>(&self, conn: &C) -> Result<String, ValidationError> {
         // Extract SNI from handshake data
         let service_name = conn
             .handshake_data()
@@ -206,7 +208,7 @@ impl QuicEndpoint {
                 }
             })?;
 
-        if !self.validator.is_served(&service_name) {
+        if !self.validator.is_served(&service_name).await {
             log::debug!("Connection to unknown service '{service_name}', rejecting");
             return Err(ValidationError::Reject {
                 reason: b"unknown-service",
@@ -233,8 +235,9 @@ mod test {
 
     struct TestValidator(Vec<String>);
 
+    #[async_trait]
     impl ServiceValidator for TestValidator {
-        fn is_served(&self, service: &str) -> bool {
+        async fn is_served(&self, service: &str) -> bool {
             self.0.iter().any(|s| s == service)
         }
     }
@@ -344,9 +347,9 @@ mod test {
         assert!(endpoint.accept().await.is_none());
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn test_validate_connection_success() {
+    async fn test_validate_connection_success() {
         let endpoint = setup_endpoint_for_accept(|_| {}); // served = vec!["test_service"]
         let mut mock_conn = MockInspectConn::new();
         mock_conn.expect_handshake_data().returning(|| {
@@ -358,13 +361,14 @@ mod test {
 
         let service_name = endpoint
             .validate_connection(&mock_conn)
+            .await
             .expect("Expected successful validation");
         assert_eq!(service_name, "test_service");
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn test_validate_connection_missing_sni() {
+    async fn test_validate_connection_missing_sni() {
         let endpoint = setup_endpoint_for_accept(|_| {});
         let mut mock_conn = MockInspectConn::new();
         mock_conn.expect_handshake_data().returning(|| {
@@ -374,15 +378,15 @@ mod test {
             })
         });
 
-        match endpoint.validate_connection(&mock_conn) {
+        match endpoint.validate_connection(&mock_conn).await {
             Err(ValidationError::Reject { reason }) => assert_eq!(reason, b"missing-sni"),
             other => panic!("Expected Reject, got {other:?}"),
         }
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn test_validate_connection_unknown_service() {
+    async fn test_validate_connection_unknown_service() {
         let endpoint = setup_endpoint_for_accept(|_| {});
         let mut mock_conn = MockInspectConn::new();
         mock_conn.expect_handshake_data().returning(|| {
@@ -392,22 +396,22 @@ mod test {
             })
         });
 
-        match endpoint.validate_connection(&mock_conn) {
+        match endpoint.validate_connection(&mock_conn).await {
             Err(ValidationError::Reject { reason }) => assert_eq!(reason, b"unknown-service"),
             other => panic!("Expected Reject, got {other:?}"),
         }
     }
 
-    #[test]
+    #[tokio::test]
     #[serial]
-    fn test_validate_connection_no_handshake_data() {
+    async fn test_validate_connection_no_handshake_data() {
         let endpoint = setup_endpoint_for_accept(|_| {});
         let mut mock_conn = MockInspectConn::new();
         mock_conn
             .expect_handshake_data()
             .returning(|| Err(Report::new(Error("Mock internal error".into()))));
 
-        match endpoint.validate_connection(&mock_conn) {
+        match endpoint.validate_connection(&mock_conn).await {
             Err(ValidationError::Internal(_)) => {} // Expected path
             other => panic!("Expected Internal, got {other:?}"),
         }
