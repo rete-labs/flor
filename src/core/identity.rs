@@ -10,7 +10,21 @@
 //!
 //! See ADR 0005 in the florete docs for the design rationale.
 
+pub mod ca;
+pub mod csr;
 pub mod kind;
 
-pub use kind::{Kind, KindError, Scope, ScopeError, kind_of, scope_of};
+pub use ca::Ca;
+pub use csr::keygen_csr;
+pub use kind::{Kind, Scope, kind_of, scope_of};
 pub use spiffe::{SpiffeId, TrustDomain};
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct Error(String);
+
+impl Error {
+    fn new(msg: impl Into<String>) -> Self {
+        Self(msg.into())
+    }
+}

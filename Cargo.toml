@@ -22,9 +22,11 @@ tokio = { version = "1", features = ["full"] }
 
 # Using "ring" backend across all crypto libs, as quinn uses it by default
 quinn = { version = "0.11" }
-rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 spiffe = { version = "0.15", default-features = false, features = ["x509"] }
+time = { version = "0.3", default-features = false, features = ["std"] }
+x509-parser = { version = "0.18", features = ["verify"] }
 
 [dev-dependencies]
 ctor = "0.8"
