@@ -17,7 +17,9 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::core::identity::SpiffeId;
+use error_stack::Report;
+
+use crate::core::identity::{Error, SpiffeId};
 
 /// The class of principal a SPIFFE ID names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,7 +60,7 @@ impl fmt::Display for Kind {
 }
 
 impl FromStr for Kind {
-    type Err = KindError;
+    type Err = Report<Error>;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -68,7 +70,9 @@ impl FromStr for Kind {
             "vertex" => Ok(Self::Vertex),
             "control-plane" => Ok(Self::ControlPlane),
             "management-plane" => Ok(Self::ManagementPlane),
-            other => Err(KindError::Unknown(other.to_string())),
+            other => Err(Report::new(Error::new(format!(
+                "Unknown principal kind {other:?}"
+            )))),
         }
     }
 }
@@ -82,36 +86,14 @@ pub enum Scope {
     Node(String),
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum KindError {
-    #[error("SPIFFE ID has no path segments")]
-    EmptyPath,
-    #[error("unknown principal kind: {0:?}")]
-    Unknown(String),
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ScopeError {
-    #[error(transparent)]
-    Kind(#[from] KindError),
-    #[error(
-        "SPIFFE ID path {path:?} has wrong shape for {kind}: \
-         expected {expected}, got {got} trailing segment(s)"
-    )]
-    WrongShape {
-        kind: Kind,
-        path: String,
-        expected: &'static str,
-        got: usize,
-    },
-}
-
 /// Project a SPIFFE ID onto its principal [`Kind`].
 ///
 /// Only inspects the first path segment; does not validate the rest of the
 /// path's shape. Use [`scope_of`] when you also need the scope.
-pub fn kind_of(id: &SpiffeId) -> Result<Kind, KindError> {
-    let first = path_segments(id).next().ok_or(KindError::EmptyPath)?;
+pub fn kind_of(id: &SpiffeId) -> Result<Kind, Report<Error>> {
+    let first = path_segments(id)
+        .next()
+        .ok_or_else(|| Report::new(Error::new("SPIFFE ID has no path segments")))?;
     first.parse()
 }
 
@@ -123,8 +105,8 @@ pub fn kind_of(id: &SpiffeId) -> Result<Kind, KindError> {
 /// - `Service`, `Vertex` → cluster-scoped (`/<kind>/<name>`) **or** node-scoped
 ///   (`/<kind>/<node>/<name>`).
 ///
-/// Any other shape is a [`ScopeError::WrongShape`].
-pub fn scope_of(id: &SpiffeId) -> Result<Scope, ScopeError> {
+/// Any other shape is an error.
+pub fn scope_of(id: &SpiffeId) -> Result<Scope, Report<Error>> {
     let kind = kind_of(id)?;
     let trailing: Vec<&str> = path_segments(id).skip(1).collect();
     match (kind, trailing.as_slice()) {
@@ -133,15 +115,17 @@ pub fn scope_of(id: &SpiffeId) -> Result<Scope, ScopeError> {
         (Kind::User | Kind::Node | Kind::ControlPlane | Kind::ManagementPlane, [_name]) => {
             Ok(Scope::Cluster)
         }
-        (kind, segs) => Err(ScopeError::WrongShape {
-            kind,
-            path: id.path().to_string(),
-            expected: match kind {
+        (kind, segs) => {
+            let expected = match kind {
                 Kind::Service | Kind::Vertex => "1 (cluster) or 2 (node-scoped) trailing segments",
                 _ => "1 trailing segment",
-            },
-            got: segs.len(),
-        }),
+            };
+            Err(Report::new(Error::new(format!(
+                "SPIFFE ID path {:?} has wrong shape for {kind}: expected {expected}, got {} trailing segment(s)",
+                id.path(),
+                segs.len(),
+            ))))
+        }
     }
 }
 
@@ -176,14 +160,16 @@ mod tests {
 
     #[test]
     fn kind_from_str_rejects_unknown() {
-        assert!(matches!(
-            "users".parse::<Kind>(),
-            Err(KindError::Unknown(s)) if s == "users"
-        ));
-        assert!(matches!(
-            "".parse::<Kind>(),
-            Err(KindError::Unknown(s)) if s.is_empty()
-        ));
+        let err = "users".parse::<Kind>().unwrap_err();
+        assert!(
+            format!("{err:?}").contains("Unknown principal kind"),
+            "{err:?}"
+        );
+        let err = "".parse::<Kind>().unwrap_err();
+        assert!(
+            format!("{err:?}").contains("Unknown principal kind"),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -216,16 +202,21 @@ mod tests {
 
     #[test]
     fn kind_of_rejects_empty_path() {
-        assert_eq!(
-            kind_of(&id("spiffe://demo.flor")).unwrap_err(),
-            KindError::EmptyPath
+        let err = kind_of(&id("spiffe://demo.flor")).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("has no path segments"),
+            "{err:?}"
         );
     }
 
     #[test]
     fn kind_of_rejects_unknown_first_segment() {
         let err = kind_of(&id("spiffe://demo.flor/robot/r2d2")).unwrap_err();
-        assert_eq!(err, KindError::Unknown("robot".to_string()));
+        assert!(
+            format!("{err:?}").contains("Unknown principal kind"),
+            "{err:?}"
+        );
+        assert!(format!("{err:?}").contains("robot"), "{err:?}");
     }
 
     #[test]
@@ -256,58 +247,34 @@ mod tests {
     #[test]
     fn scope_of_rejects_extra_segments_for_cluster_kinds() {
         let err = scope_of(&id("spiffe://demo.flor/user/alice/extra")).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                ScopeError::WrongShape {
-                    kind: Kind::User,
-                    got: 2,
-                    ..
-                }
-            ),
-            "{err:?}",
-        );
+        let msg = format!("{err:?}");
+        assert!(msg.contains("wrong shape for user"), "{msg}");
+        assert!(msg.contains("got 2 trailing"), "{msg}");
     }
 
     #[test]
     fn scope_of_rejects_too_many_segments_for_service() {
         let err = scope_of(&id("spiffe://demo.flor/service/a/b/c")).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                ScopeError::WrongShape {
-                    kind: Kind::Service,
-                    got: 3,
-                    ..
-                }
-            ),
-            "{err:?}",
-        );
+        let msg = format!("{err:?}");
+        assert!(msg.contains("wrong shape for service"), "{msg}");
+        assert!(msg.contains("got 3 trailing"), "{msg}");
     }
 
     #[test]
     fn scope_of_rejects_missing_name() {
         // `/user` alone has no name segment.
         let err = scope_of(&id("spiffe://demo.flor/user")).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                ScopeError::WrongShape {
-                    kind: Kind::User,
-                    got: 0,
-                    ..
-                }
-            ),
-            "{err:?}",
-        );
+        let msg = format!("{err:?}");
+        assert!(msg.contains("wrong shape for user"), "{msg}");
+        assert!(msg.contains("got 0 trailing"), "{msg}");
     }
 
     #[test]
     fn scope_of_propagates_kind_error() {
         let err = scope_of(&id("spiffe://demo.flor/robot/r2d2")).unwrap_err();
         assert!(
-            matches!(err, ScopeError::Kind(KindError::Unknown(_))),
-            "{err:?}"
+            format!("{err:?}").contains("Unknown principal kind"),
+            "{err:?}",
         );
     }
 }
