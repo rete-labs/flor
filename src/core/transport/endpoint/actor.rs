@@ -1,7 +1,7 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use error_stack::{IntoReport, Report, ResultExt};
@@ -18,36 +18,22 @@ use crate::{
 
 use super::{QuicEndpoint, ServiceValidator, connection::QuicConnection};
 
-/// Shared registry of currently subscribed service names.
+/// Shared registry mapping service names to their subscriber channels.
 ///
 /// Written by the actor on publish/cleanup; read by [`QuicEndpoint`] on every accepted
 /// connection to decide whether the requested SNI service is served.
-struct SharedServiceRegistry(RwLock<HashSet<String>>);
+struct SharedServiceRegistry(RwLock<HashMap<String, mpsc::Sender<(String, QuicConnection)>>>);
 
 impl SharedServiceRegistry {
     fn new() -> Arc<Self> {
-        Arc::new(Self(RwLock::new(HashSet::new())))
-    }
-
-    async fn register(&self, services: &[String]) {
-        let mut set = self.0.write().await;
-        for s in services {
-            set.insert(s.clone());
-        }
-    }
-
-    async fn unregister<'a>(&self, services: impl Iterator<Item = &'a String>) {
-        let mut set = self.0.write().await;
-        for s in services {
-            set.remove(s.as_str());
-        }
+        Arc::new(Self(RwLock::new(HashMap::new())))
     }
 }
 
 #[async_trait]
 impl ServiceValidator for SharedServiceRegistry {
     async fn is_served(&self, service: &str) -> bool {
-        self.0.read().await.contains(service)
+        self.0.read().await.contains_key(service)
     }
 }
 
@@ -141,7 +127,6 @@ impl QuicAcceptor {
 
 pub(crate) struct QuicEndpointActor {
     endpoint: QuicEndpoint,
-    subscribers: HashMap<String, mpsc::Sender<(String, QuicConnection)>>,
     registry: Arc<SharedServiceRegistry>,
 }
 
@@ -171,11 +156,7 @@ impl QuicEndpointActor {
     ) -> (QuicConnector, QuicPublisher, QuicHandle) {
         let (connect_tx, connect_rx) = mpsc::channel(CHANNEL_CAPACITY);
         let (publish_tx, publish_rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let actor = Self {
-            endpoint,
-            subscribers: HashMap::new(),
-            registry,
-        };
+        let actor = Self { endpoint, registry };
         let join = tokio::spawn(actor.run(connect_rx, publish_rx));
         (
             QuicConnector(connect_tx),
@@ -184,32 +165,29 @@ impl QuicEndpointActor {
         )
     }
 
-    async fn handle_connect(&mut self, msg: ConnectMsg) {
+    async fn handle_connect(&self, msg: ConnectMsg) {
         let result = self.endpoint.connect(&msg.service).await;
         let _ = msg.reply.send(result);
     }
 
-    async fn cleanup_stale(&mut self) {
-        let stale: Vec<String> = self
-            .subscribers
-            .iter()
-            .filter(|(_, tx)| tx.is_closed())
-            .map(|(svc, _)| svc.clone())
-            .collect();
-        self.registry.unregister(stale.iter()).await;
-        for svc in stale {
-            self.subscribers.remove(&svc);
-        }
+    async fn cleanup_stale(&self) {
+        self.registry
+            .0
+            .write()
+            .await
+            .retain(|_, tx| !tx.is_closed());
     }
 
-    async fn handle_publish(&mut self, msg: PublishMsg) {
+    async fn handle_publish(&self, msg: PublishMsg) {
         self.cleanup_stale().await;
 
-        let conflicting: Vec<&str> = msg
+        let mut locked_map = self.registry.0.write().await;
+
+        let conflicting: Vec<String> = msg
             .served
             .iter()
-            .filter(|s| self.subscribers.contains_key(s.as_str()))
-            .map(String::as_str)
+            .filter(|s| locked_map.contains_key(s.as_str()))
+            .cloned()
             .collect();
 
         if !conflicting.is_empty() {
@@ -223,14 +201,13 @@ impl QuicEndpointActor {
 
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         for service in &msg.served {
-            self.subscribers.insert(service.clone(), tx.clone());
+            locked_map.insert(service.clone(), tx.clone());
         }
-        self.registry.register(&msg.served).await;
         let _ = msg.reply.send(Ok(rx));
     }
 
-    async fn dispatch_connection(&mut self, service_name: String, conn: QuicConnection) {
-        let tx = self.subscribers.get(&service_name).cloned();
+    async fn dispatch_connection(&self, service_name: String, conn: QuicConnection) {
+        let tx = self.registry.0.read().await.get(&service_name).cloned();
         match tx {
             Some(tx) => {
                 if tx.send((service_name.clone(), conn)).await.is_err() {
@@ -249,7 +226,7 @@ impl QuicEndpointActor {
     }
 
     async fn run(
-        mut self,
+        self,
         mut connect_rx: mpsc::Receiver<ConnectMsg>,
         mut publish_rx: mpsc::Receiver<PublishMsg>,
     ) {
@@ -282,7 +259,7 @@ impl_lifecycle_handle!(QuicHandle);
 
 #[cfg(test)]
 mod test {
-    use std::{collections::HashMap, sync::Arc};
+    use std::sync::Arc;
 
     use serial_test::serial;
     use tokio::sync::oneshot;
@@ -315,21 +292,19 @@ mod test {
         let registry = SharedServiceRegistry::new();
         QuicEndpointActor {
             endpoint: setup_endpoint_for_publish_tests(registry.clone()),
-            subscribers: HashMap::new(),
             registry,
         }
     }
 
-    async fn do_publish(actor: &mut QuicEndpointActor, services: Vec<&str>) -> PublishResult {
-        let (tx, mut rx) = oneshot::channel();
+    async fn do_publish(actor: &QuicEndpointActor, services: Vec<&str>) -> PublishResult {
+        let (tx, rx) = oneshot::channel();
         actor
             .handle_publish(PublishMsg {
                 served: services.into_iter().map(str::to_string).collect(),
                 reply: tx,
             })
             .await;
-        rx.try_recv()
-            .expect("handle_publish must send a reply synchronously")
+        rx.await.expect("handle_publish must send a reply")
     }
 
     // --- handle_publish tests ---
@@ -337,43 +312,48 @@ mod test {
     #[tokio::test]
     #[serial]
     async fn test_publish_registers_new_services() {
-        let mut actor = make_actor();
+        let actor = make_actor();
 
-        let result = do_publish(&mut actor, vec!["svc1", "svc2"]).await;
+        let result = do_publish(&actor, vec!["svc1", "svc2"]).await;
 
         assert!(result.is_ok());
-        assert!(actor.subscribers.contains_key("svc1"));
-        assert!(actor.subscribers.contains_key("svc2"));
+        let map = actor.registry.0.read().await;
+        assert!(map.contains_key("svc1"));
+        assert!(map.contains_key("svc2"));
     }
 
     #[tokio::test]
     #[serial]
     async fn test_publish_single_service_shares_channel_across_names() {
-        let mut actor = make_actor();
-        let result = do_publish(&mut actor, vec!["svc1", "svc2"]).await;
+        let actor = make_actor();
+        let result = do_publish(&actor, vec!["svc1", "svc2"]).await;
 
         let rx = result.expect("publish failed");
         // Both service names map to senders on the same channel.
         // Verify by checking that both senders are alive and reference the same logical channel.
-        let tx1 = actor.subscribers.get("svc1").unwrap();
-        let tx2 = actor.subscribers.get("svc2").unwrap();
-        assert!(!tx1.is_closed());
-        assert!(!tx2.is_closed());
+        {
+            let map = actor.registry.0.read().await;
+            assert!(!map.get("svc1").unwrap().is_closed());
+            assert!(!map.get("svc2").unwrap().is_closed());
+        }
         drop(rx);
-        assert!(tx1.is_closed());
-        assert!(tx2.is_closed());
+        {
+            let map = actor.registry.0.read().await;
+            assert!(map.get("svc1").unwrap().is_closed());
+            assert!(map.get("svc2").unwrap().is_closed());
+        }
     }
 
     #[tokio::test]
     #[serial]
     async fn test_publish_conflict_returns_error_naming_service() {
-        let mut actor = make_actor();
+        let actor = make_actor();
 
-        let _sub = do_publish(&mut actor, vec!["svc1"])
+        let _sub = do_publish(&actor, vec!["svc1"])
             .await
             .expect("first publish failed");
 
-        let err = do_publish(&mut actor, vec!["svc1"]).await.unwrap_err();
+        let err = do_publish(&actor, vec!["svc1"]).await.unwrap_err();
         assert!(
             err.to_string().contains("svc1"),
             "error must name the conflicting service; got: {err}"
@@ -383,17 +363,17 @@ mod test {
     #[tokio::test]
     #[serial]
     async fn test_publish_partial_conflict_is_atomic() {
-        let mut actor = make_actor();
+        let actor = make_actor();
 
-        let _sub = do_publish(&mut actor, vec!["svc1"])
+        let _sub = do_publish(&actor, vec!["svc1"])
             .await
             .expect("setup failed");
 
         // svc1 conflicts, svc2 is new — the whole publish must be rejected.
-        let result = do_publish(&mut actor, vec!["svc1", "svc2"]).await;
+        let result = do_publish(&actor, vec!["svc1", "svc2"]).await;
         assert!(result.is_err(), "publish with a conflict must fail");
         assert!(
-            !actor.subscribers.contains_key("svc2"),
+            !actor.registry.0.read().await.contains_key("svc2"),
             "svc2 must not be partially registered when svc1 conflicts"
         );
     }
@@ -401,14 +381,14 @@ mod test {
     #[tokio::test]
     #[serial]
     async fn test_publish_allows_reregister_after_subscriber_drops() {
-        let mut actor = make_actor();
+        let actor = make_actor();
 
-        let sub = do_publish(&mut actor, vec!["svc1"])
+        let sub = do_publish(&actor, vec!["svc1"])
             .await
             .expect("first publish failed");
         drop(sub); // simulate subscriber dropping its QuicAcceptor
 
-        let result = do_publish(&mut actor, vec!["svc1"]).await;
+        let result = do_publish(&actor, vec!["svc1"]).await;
         assert!(
             result.is_ok(),
             "should succeed after stale subscriber is cleaned up"
