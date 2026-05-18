@@ -3,6 +3,7 @@
 
 use std::{collections::HashMap, net::SocketAddr};
 
+pub mod cli;
 pub mod core;
 pub mod logging;
 pub mod northbound;

@@ -1,16 +1,20 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use error_stack::{Report, ResultExt};
 
 use flor::{
     AddrMap, AppConfigBundle, EndpointAddr, Socks5Addr,
-    core::transport::{
-        QuicConnector, TransportBundle,
-        endpoint::connection::{Accept, Open},
+    cli::write_secret,
+    core::{
+        identity::{Kind, TrustDomain, build_id, keygen_csr},
+        transport::{
+            QuicConnector, TransportBundle,
+            endpoint::connection::{Accept, Open},
+        },
     },
     logging,
     northbound::inbound::{Error as InboundError, InboundBundle},
@@ -22,11 +26,50 @@ use flor::{
 pub struct Error(String);
 
 #[derive(Parser, Debug)]
-#[command(name = "flor", about = "Florete C1 Demo")]
+#[command(name = "flor", about = "Florete node binary (daemon + node-local CLI)")]
 struct Args {
-    /// Select node config: Alpha, Beta, or Gamma
-    #[arg(long, default_value = "Alpha", value_parser = ["Alpha", "Beta", "Gamma"])]
-    name: String,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Identity primitives.
+    Id {
+        #[command(subcommand)]
+        action: IdAction,
+    },
+    /// Run the demo (legacy, replaced by `agent run` once the daemon lands).
+    Demo {
+        /// Select node config: Alpha, Beta, or Gamma
+        #[arg(long, default_value = "Alpha", value_parser = ["Alpha", "Beta", "Gamma"])]
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum IdAction {
+    /// Generate a keypair locally and emit a CSR for the operator to sign.
+    Keygen {
+        /// Principal kind.
+        #[arg(long, value_enum)]
+        kind: Kind,
+        /// Principal name (last path segment of the SPIFFE ID).
+        #[arg(long)]
+        name: String,
+        /// Cluster trust domain (e.g. `demo.flor`).
+        #[arg(long)]
+        trust_domain: String,
+        /// Node name for node-scoped principals.
+        #[arg(long)]
+        scope: Option<String>,
+        /// Where to write the PKCS#8 PEM private key (mode 0600 on Unix).
+        #[arg(long)]
+        out_key: PathBuf,
+        /// Where to write the PEM-encoded CSR.
+        #[arg(long)]
+        out_csr: PathBuf,
+    },
 }
 
 #[fundle::bundle]
@@ -38,19 +81,66 @@ struct AppBundle {
     pub inbound: InboundBundle,
 }
 
-#[tokio::main]
-async fn main() {
-    logging::logger::init(log::LevelFilter::Info).expect("Failed to initialize logger");
-
-    if let Err(e) = run().await {
-        log::error!("Application failed: {e:?}");
-        std::process::exit(1);
+fn main() {
+    let args = Args::parse();
+    match args.cmd {
+        Cmd::Id {
+            action: IdAction::Keygen { .. },
+        } => {
+            // Synchronous path — no tokio needed.
+            if let Err(e) = run_id_keygen(args.cmd) {
+                eprintln!("flor id keygen failed: {e:?}");
+                std::process::exit(1);
+            }
+        }
+        Cmd::Demo { .. } => {
+            logging::logger::init(log::LevelFilter::Info).expect("Failed to initialize logger");
+            let rt = tokio::runtime::Runtime::new().expect("Failed to build tokio runtime");
+            if let Err(e) = rt.block_on(run_demo(args.cmd)) {
+                log::error!("Application failed: {e:?}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
-async fn run() -> Result<(), Report<Error>> {
-    let args = Args::parse();
-    let node_name = args.name;
+fn run_id_keygen(cmd: Cmd) -> Result<(), Report<Error>> {
+    let Cmd::Id {
+        action:
+            IdAction::Keygen {
+                kind,
+                name,
+                trust_domain,
+                scope,
+                out_key,
+                out_csr,
+            },
+    } = cmd
+    else {
+        unreachable!()
+    };
+
+    let td =
+        TrustDomain::new(&trust_domain).change_context(Error("Invalid trust domain".into()))?;
+    let id = build_id(&td, kind, &name, scope.as_deref())
+        .change_context(Error("Failed to build SPIFFE ID".into()))?;
+    let (key, csr_pem) = keygen_csr(&id).change_context(Error("Keygen failed".into()))?;
+
+    write_secret(&out_key, key.serialize_pem().as_bytes())
+        .change_context(Error("Failed to write private key".into()))?;
+    std::fs::write(&out_csr, csr_pem.as_bytes())
+        .change_context_lazy(|| Error(format!("Failed to write CSR to {}", out_csr.display())))?;
+
+    println!("SPIFFE ID: {id}");
+    println!("Key:       {}", out_key.display());
+    println!("CSR:       {}", out_csr.display());
+    Ok(())
+}
+
+async fn run_demo(cmd: Cmd) -> Result<(), Report<Error>> {
+    let Cmd::Demo { name: node_name } = cmd else {
+        unreachable!()
+    };
 
     // Initial version uses workload names instead of identities.
     // Node configuration: (quic_addr, served_workloads, socks5_addr)

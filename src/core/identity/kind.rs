@@ -17,12 +17,12 @@
 use std::fmt;
 use std::str::FromStr;
 
-use error_stack::Report;
+use error_stack::{Report, bail};
 
 use crate::core::identity::{Error, SpiffeId};
 
 /// The class of principal a SPIFFE ID names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
 pub enum Kind {
     /// A human operator or end user.
     User,
@@ -34,8 +34,7 @@ pub enum Kind {
     Vertex,
     /// A control-plane signing identity. Not used for mTLS.
     ControlPlane,
-    /// A management-plane signing identity (operator's envelope-signing key).
-    /// Not used for mTLS.
+    /// A management-plane signing identity. Not used for mTLS.
     ManagementPlane,
 }
 
@@ -50,6 +49,13 @@ impl Kind {
             Self::ControlPlane => "control-plane",
             Self::ManagementPlane => "management-plane",
         }
+    }
+
+    /// Whether this kind can be bound to a specific node (node-scoped) or is
+    /// always cluster-scoped. Only `Service` and `Vertex` exist on a particular
+    /// node; everything else is cluster-wide.
+    pub const fn supports_node_scope(self) -> bool {
+        matches!(self, Self::Service | Self::Vertex)
     }
 }
 
@@ -109,22 +115,20 @@ pub fn kind_of(id: &SpiffeId) -> Result<Kind, Report<Error>> {
 pub fn scope_of(id: &SpiffeId) -> Result<Scope, Report<Error>> {
     let kind = kind_of(id)?;
     let trailing: Vec<&str> = path_segments(id).skip(1).collect();
-    match (kind, trailing.as_slice()) {
-        (Kind::Service | Kind::Vertex, [_name]) => Ok(Scope::Cluster),
-        (Kind::Service | Kind::Vertex, [node, _name]) => Ok(Scope::Node((*node).to_string())),
-        (Kind::User | Kind::Node | Kind::ControlPlane | Kind::ManagementPlane, [_name]) => {
-            Ok(Scope::Cluster)
-        }
-        (kind, segs) => {
-            let expected = match kind {
-                Kind::Service | Kind::Vertex => "1 (cluster) or 2 (node-scoped) trailing segments",
-                _ => "1 trailing segment",
+    match (trailing.as_slice(), kind.supports_node_scope()) {
+        ([_name], _) => Ok(Scope::Cluster),
+        ([node, _name], true) => Ok(Scope::Node((*node).to_string())),
+        _ => {
+            let expected = if kind.supports_node_scope() {
+                "1 (cluster) or 2 (node-scoped) trailing segments"
+            } else {
+                "1 trailing segment"
             };
-            Err(Report::new(Error::new(format!(
+            bail!(Error::new(format!(
                 "SPIFFE ID path {:?} has wrong shape for {kind}: expected {expected}, got {} trailing segment(s)",
                 id.path(),
-                segs.len(),
-            ))))
+                trailing.len(),
+            )))
         }
     }
 }
