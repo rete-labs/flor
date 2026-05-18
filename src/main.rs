@@ -8,7 +8,7 @@ use error_stack::{Report, ResultExt};
 
 use flor::{
     AddrMap, AppConfigBundle, EndpointAddr, Socks5Addr,
-    cli::write_secret,
+    cli::{print_error, write_secret},
     core::{
         identity::{Kind, TrustDomain, build_id, keygen_csr},
         transport::{
@@ -28,6 +28,10 @@ pub struct Error(String);
 #[derive(Parser, Debug)]
 #[command(name = "flor", about = "Florete node binary (daemon + node-local CLI)")]
 struct Args {
+    /// Show the full error-stack chain on failure (default: compact `: `-joined chain).
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -83,13 +87,14 @@ struct AppBundle {
 
 fn main() {
     let args = Args::parse();
+    let verbose = args.verbose;
     match args.cmd {
         Cmd::Id {
             action: IdAction::Keygen { .. },
         } => {
             // Synchronous path — no tokio needed.
             if let Err(e) = run_id_keygen(args.cmd) {
-                eprintln!("flor id keygen failed: {e:?}");
+                print_error(&e, verbose);
                 std::process::exit(1);
             }
         }
@@ -97,7 +102,7 @@ fn main() {
             logging::logger::init(log::LevelFilter::Info).expect("Failed to initialize logger");
             let rt = tokio::runtime::Runtime::new().expect("Failed to build tokio runtime");
             if let Err(e) = rt.block_on(run_demo(args.cmd)) {
-                log::error!("Application failed: {e:?}");
+                print_error(&e, verbose);
                 std::process::exit(1);
             }
         }

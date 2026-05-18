@@ -3,15 +3,61 @@
 
 //! Shared CLI helpers used by both `flor` and `florctl` binaries.
 
+use std::fmt;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 
-use error_stack::{Report, ResultExt};
+use error_stack::{FrameKind, Report, ResultExt};
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct Error(String);
+
+/// Print an error report to stderr with a bold-red `error:` prefix, in the
+/// style of `cargo` / `rustc`.
+///
+/// - `verbose = false`: compact anyhow-style chain — each context's
+///   message joined by `": "`. Hides frame locations and internal lib detail.
+/// - `verbose = true`: full error-stack tree via `Debug`. Use when the
+///   compact chain doesn't point at the cause.
+pub fn print_error<E>(report: &Report<E>, verbose: bool) {
+    let prefix = error_prefix();
+    if verbose {
+        eprintln!("{prefix} {report:?}");
+    } else {
+        eprintln!("{prefix} {}", CompactChain(report));
+    }
+}
+
+fn error_prefix() -> &'static str {
+    // ANSI bold red. Suppressed when stderr isn't a TTY or NO_COLOR is set
+    // (https://no-color.org/).
+    let use_color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    if use_color {
+        "\x1b[1;31merror:\x1b[0m"
+    } else {
+        "error:"
+    }
+}
+
+struct CompactChain<'a, E>(&'a Report<E>);
+
+impl<E> fmt::Display for CompactChain<'_, E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut first = true;
+        for frame in self.0.frames() {
+            if let FrameKind::Context(ctx) = frame.kind() {
+                if !first {
+                    f.write_str(": ")?;
+                }
+                write!(f, "{ctx}")?;
+                first = false;
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Write a file holding private key material.
 ///

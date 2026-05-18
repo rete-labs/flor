@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use error_stack::{Report, ResultExt};
 
 use flor::{
-    cli::write_secret,
+    cli::{print_error, write_secret},
     core::identity::{Ca, Kind, TrustDomain, build_id},
 };
 
@@ -23,6 +23,10 @@ struct Error(String);
 #[derive(Parser, Debug)]
 #[command(name = "florctl", about = "Florete operator CLI (cluster authoring)")]
 struct Cli {
+    /// Show the full error-stack chain on failure (default: compact `: `-joined chain).
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -94,7 +98,7 @@ struct CaSignArgs {
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli.cmd) {
-        eprintln!("florctl failed: {e:?}");
+        print_error(&e, cli.verbose);
         std::process::exit(1);
     }
 }
