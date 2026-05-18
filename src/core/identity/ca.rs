@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use error_stack::{Report, ResultExt};
+use error_stack::{Report, ResultExt, bail};
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateSigningRequestParams, DistinguishedName,
     DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, PKCS_ED25519, SanType,
@@ -33,6 +33,7 @@ pub struct Ca {
     issuer: Issuer<'static, KeyPair>,
     cert_der: CertificateDer<'static>,
     cert_pem: String,
+    trust_domain: TrustDomain,
 }
 
 impl Ca {
@@ -76,6 +77,7 @@ impl Ca {
             issuer,
             cert_der,
             cert_pem,
+            trust_domain: trust_domain.clone(),
         })
     }
 
@@ -94,12 +96,19 @@ impl Ca {
         let (_, pem) = x509_parser::pem::parse_x509_pem(cert_pem)
             .change_context(Error::new("Failed to decode CA certificate PEM block"))?;
         let cert_der = CertificateDer::from(pem.contents);
+        let trust_domain = extract_spiffe_id(&cert_der)?.trust_domain().clone();
 
         Ok(Self {
             issuer,
             cert_der,
             cert_pem: cert_pem_str.to_string(),
+            trust_domain,
         })
+    }
+
+    /// The cluster trust domain this CA signs for.
+    pub fn trust_domain(&self) -> &TrustDomain {
+        &self.trust_domain
     }
 
     /// The CA certificate in PEM form (safe to publish; contains no secrets).
@@ -107,27 +116,23 @@ impl Ca {
         &self.cert_pem
     }
 
-    /// The CA certificate in DER form.
-    pub fn cert_der(&self) -> &CertificateDer<'static> {
-        &self.cert_der
-    }
-
-    /// The CA's signing keypair. Holds the CA private key — do not persist
-    /// alongside the public cert.
-    pub fn key(&self) -> &KeyPair {
-        self.issuer.key()
+    /// The CA private key in PEM form (PKCS#8). **Never** persist alongside
+    /// [`cert_pem`](Self::cert_pem); writers should set restrictive file
+    /// permissions (e.g. mode 0600 via [`crate::cli::write_secret`]).
+    pub fn key_pem(&self) -> String {
+        self.issuer.key().serialize_pem()
     }
 
     /// Sign a CSR for the principal identified by `id`, applying the
     /// extension policy for `kind`. See module-level docs for the CSR-SAN
-    /// validation rule.
+    /// validation rule. Returns the issued certificate in PEM form.
     pub fn sign_csr(
         &self,
         csr_pem: &[u8],
         id: &SpiffeId,
         kind: Kind,
         validity: Duration,
-    ) -> Result<CertificateDer<'static>, Report<Error>> {
+    ) -> Result<String, Report<Error>> {
         let csr_pem_str = std::str::from_utf8(csr_pem)
             .change_context(Error::new("CSR PEM is not valid UTF-8"))?;
         let csr = CertificateSigningRequestParams::from_pem(csr_pem_str)
@@ -142,10 +147,10 @@ impl Ca {
             "CSR",
         )?;
         if csr_uri != expected_uri {
-            return Err(Report::new(Error::new(format!(
+            bail!(Error::new(format!(
                 "CSR's SAN does not match operator-supplied identity: \
                  CSR claims {csr_uri:?}, operator authorized {expected_uri:?}",
-            ))));
+            )));
         }
 
         let now = OffsetDateTime::now_utc();
@@ -163,7 +168,7 @@ impl Ca {
         let cert = params
             .signed_by(&csr.public_key, &self.issuer)
             .change_context(Error::new("Failed to issue certificate"))?;
-        Ok(cert.der().clone())
+        Ok(cert.pem())
     }
 
     /// Verify a leaf cert was issued by this CA and return its SPIFFE ID.
@@ -171,10 +176,14 @@ impl Ca {
     /// Checks the signature against the CA's public key and extracts the
     /// single URI SAN. Does *not* check the validity window — callers that
     /// care should add a clock check.
-    pub fn verify(&self, cert: &CertificateDer<'_>) -> Result<SpiffeId, Report<Error>> {
+    pub fn verify(&self, cert_pem: &[u8]) -> Result<SpiffeId, Report<Error>> {
+        let (_, pem) = x509_parser::pem::parse_x509_pem(cert_pem)
+            .change_context(Error::new("Failed to decode certificate PEM block"))?;
+        let cert_der = CertificateDer::from(pem.contents);
+
         let (_, ca) = x509_parser::parse_x509_certificate(self.cert_der.as_ref())
             .change_context(Error::new("Failed to parse CA certificate"))?;
-        let (_, leaf) = x509_parser::parse_x509_certificate(cert.as_ref())
+        let (_, leaf) = x509_parser::parse_x509_certificate(cert_der.as_ref())
             .change_context(Error::new("Failed to parse leaf certificate"))?;
 
         leaf.verify_signature(Some(ca.public_key()))
@@ -182,29 +191,38 @@ impl Ca {
                 "Certificate signature does not verify against this CA",
             ))?;
 
-        let san_ext = leaf
-            .subject_alternative_name()
-            .change_context(Error::new(
-                "Failed to read Subject Alternative Name extension",
-            ))?
-            .ok_or_else(|| {
-                Report::new(Error::new(
-                    "Certificate has no Subject Alternative Name extension",
-                ))
-            })?;
-
-        let uri = single_uri_san(
-            san_ext.value.general_names.iter().map(|g| match g {
-                x509_parser::extensions::GeneralName::URI(s) => Some(*s),
-                _ => None,
-            }),
-            "Certificate",
-        )?;
-
-        SpiffeId::new(uri).change_context(Error::new(format!(
-            "Certificate URI SAN {uri:?} is not a valid SPIFFE ID"
-        )))
+        extract_spiffe_id(&cert_der)
     }
+}
+
+/// Parse a certificate's single URI SAN and return it as a SPIFFE ID.
+/// Does no signature verification — callers must verify the cert separately
+/// if trust is required.
+fn extract_spiffe_id(cert: &CertificateDer<'_>) -> Result<SpiffeId, Report<Error>> {
+    let (_, parsed) = x509_parser::parse_x509_certificate(cert.as_ref())
+        .change_context(Error::new("Failed to parse certificate"))?;
+    let san_ext = parsed
+        .subject_alternative_name()
+        .change_context(Error::new(
+            "Failed to read Subject Alternative Name extension",
+        ))?
+        .ok_or_else(|| {
+            Report::new(Error::new(
+                "Certificate has no Subject Alternative Name extension",
+            ))
+        })?;
+
+    let uri = single_uri_san(
+        san_ext.value.general_names.iter().map(|g| match g {
+            x509_parser::extensions::GeneralName::URI(s) => Some(*s),
+            _ => None,
+        }),
+        "Certificate",
+    )?;
+
+    SpiffeId::new(uri).change_context(Error::new(format!(
+        "Certificate URI SAN {uri:?} is not a valid SPIFFE ID"
+    )))
 }
 
 /// Extract the sole URI SAN from a stream of SANs.
@@ -223,9 +241,7 @@ fn single_uri_san<'a>(
         match s {
             Some(u) => {
                 if uri.is_some() {
-                    return Err(Report::new(Error::new(format!(
-                        "{source} has more than one URI SAN"
-                    ))));
+                    bail!(Error::new(format!("{source} has more than one URI SAN")));
                 }
                 uri = Some(u);
             }
@@ -234,9 +250,9 @@ fn single_uri_san<'a>(
     }
     let uri = uri.ok_or_else(|| Report::new(Error::new(format!("{source} has no URI SAN"))))?;
     if other_types > 0 {
-        return Err(Report::new(Error::new(format!(
+        bail!(Error::new(format!(
             "{source} has SANs of types other than URI"
-        ))));
+        )));
     }
     Ok(uri)
 }
@@ -278,10 +294,18 @@ mod tests {
         Duration::from_secs(24 * 3600)
     }
 
+    /// Decode a leaf cert PEM into a DER buffer suitable for `x509-parser`.
+    /// Tests are white-box; they peer inside the cert that the public API
+    /// returned as PEM.
+    fn pem_to_der(pem: &str) -> Vec<u8> {
+        let (_, p) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).unwrap();
+        p.contents
+    }
+
     #[test]
     fn init_produces_self_signed_ca_cert() {
         let ca = Ca::init(&td(), day()).unwrap();
-        let (_, parsed) = x509_parser::parse_x509_certificate(ca.cert_der().as_ref()).unwrap();
+        let (_, parsed) = x509_parser::parse_x509_certificate(ca.cert_der.as_ref()).unwrap();
         assert!(parsed.is_ca());
         parsed.verify_signature(None).unwrap();
 
@@ -296,7 +320,7 @@ mod tests {
         // rcgen marks keyUsage critical whenever it's present; this test
         // locks that in.
         let ca = Ca::init(&td(), day()).unwrap();
-        let (_, ca_parsed) = x509_parser::parse_x509_certificate(ca.cert_der().as_ref()).unwrap();
+        let (_, ca_parsed) = x509_parser::parse_x509_certificate(ca.cert_der.as_ref()).unwrap();
         let ca_ku = ca_parsed
             .extensions()
             .iter()
@@ -315,7 +339,8 @@ mod tests {
             let id = SpiffeId::new(uri).unwrap();
             let (_k, csr) = keygen_csr(&id).unwrap();
             let leaf = ca.sign_csr(csr.as_bytes(), &id, kind, day()).unwrap();
-            let (_, parsed) = x509_parser::parse_x509_certificate(leaf.as_ref()).unwrap();
+            let leaf_der = pem_to_der(&leaf);
+            let (_, parsed) = x509_parser::parse_x509_certificate(&leaf_der).unwrap();
             let ku = parsed
                 .extensions()
                 .iter()
@@ -333,8 +358,8 @@ mod tests {
         let id = SpiffeId::new("spiffe://demo.flor/user/alice").unwrap();
         let (_k, csr) = keygen_csr(&id).unwrap();
         let leaf = ca.sign_csr(csr.as_bytes(), &id, Kind::User, day()).unwrap();
-
-        let (_, leaf_parsed) = x509_parser::parse_x509_certificate(leaf.as_ref()).unwrap();
+        let leaf_der = pem_to_der(&leaf);
+        let (_, leaf_parsed) = x509_parser::parse_x509_certificate(&leaf_der).unwrap();
         let leaf_san = leaf_parsed
             .extensions()
             .iter()
@@ -342,7 +367,7 @@ mod tests {
             .expect("leaf has SAN");
         assert!(leaf_san.critical, "leaf SAN must be critical");
 
-        let (_, ca_parsed) = x509_parser::parse_x509_certificate(ca.cert_der().as_ref()).unwrap();
+        let (_, ca_parsed) = x509_parser::parse_x509_certificate(ca.cert_der.as_ref()).unwrap();
         let ca_san = ca_parsed
             .extensions()
             .iter()
@@ -355,17 +380,17 @@ mod tests {
     fn round_trip_through_pem() {
         let ca = Ca::init(&td(), day()).unwrap();
         let cert_pem = ca.cert_pem().to_string();
-        let key_pem = ca.key().serialize_pem();
+        let key_pem = ca.key_pem();
 
         let leaf_id = SpiffeId::new("spiffe://demo.flor/user/alice").unwrap();
         let (_k, csr_pem) = keygen_csr(&leaf_id).unwrap();
-        let leaf_der_a = ca
+        let leaf_pem = ca
             .sign_csr(csr_pem.as_bytes(), &leaf_id, Kind::User, day())
             .unwrap();
 
         let ca2 = Ca::from_pem(cert_pem.as_bytes(), key_pem.as_bytes()).unwrap();
         // Re-hydrated CA verifies the leaf signed by the original.
-        let recovered = ca2.verify(&leaf_der_a).unwrap();
+        let recovered = ca2.verify(leaf_pem.as_bytes()).unwrap();
         assert_eq!(recovered, leaf_id);
     }
 
@@ -390,7 +415,7 @@ mod tests {
             let id = SpiffeId::new(uri).unwrap();
             let (_k, csr) = keygen_csr(&id).unwrap();
             let leaf = ca.sign_csr(csr.as_bytes(), &id, kind, day()).unwrap();
-            assert_eq!(ca.verify(&leaf).unwrap(), id, "{kind:?}");
+            assert_eq!(ca.verify(leaf.as_bytes()).unwrap(), id, "{kind:?}");
         }
     }
 
@@ -406,7 +431,8 @@ mod tests {
             let id = SpiffeId::new(uri).unwrap();
             let (_k, csr) = keygen_csr(&id).unwrap();
             let leaf = ca.sign_csr(csr.as_bytes(), &id, kind, day()).unwrap();
-            let (_, parsed) = x509_parser::parse_x509_certificate(leaf.as_ref()).unwrap();
+            let leaf_der = pem_to_der(&leaf);
+            let (_, parsed) = x509_parser::parse_x509_certificate(&leaf_der).unwrap();
             let eku = parsed
                 .extended_key_usage()
                 .unwrap()
@@ -433,7 +459,8 @@ mod tests {
             let id = SpiffeId::new(uri).unwrap();
             let (_k, csr) = keygen_csr(&id).unwrap();
             let leaf = ca.sign_csr(csr.as_bytes(), &id, kind, day()).unwrap();
-            let (_, parsed) = x509_parser::parse_x509_certificate(leaf.as_ref()).unwrap();
+            let leaf_der = pem_to_der(&leaf);
+            let (_, parsed) = x509_parser::parse_x509_certificate(&leaf_der).unwrap();
             assert!(
                 parsed.extended_key_usage().unwrap().is_none(),
                 "{kind:?} unexpectedly has EKU",
@@ -507,7 +534,7 @@ mod tests {
         let leaf = ca1
             .sign_csr(csr.as_bytes(), &id, Kind::User, day())
             .unwrap();
-        let err = ca2.verify(&leaf).unwrap_err();
+        let err = ca2.verify(leaf.as_bytes()).unwrap_err();
         assert!(
             format!("{err:?}").contains("signature does not verify"),
             "{err:?}",
