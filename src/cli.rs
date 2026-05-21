@@ -8,6 +8,7 @@ use std::fs::OpenOptions;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 
+use clap::builder::styling::{AnsiColor, Style};
 use error_stack::{FrameKind, Report, ResultExt};
 
 #[derive(Debug, thiserror::Error)]
@@ -22,22 +23,23 @@ pub struct Error(String);
 /// - `verbose = true`: full error-stack tree via `Debug`. Use when the
 ///   compact chain doesn't point at the cause.
 pub fn print_error<E>(report: &Report<E>, verbose: bool) {
-    let prefix = error_prefix();
+    let style = error_prefix_style();
     if verbose {
-        eprintln!("{prefix} {report:?}");
+        eprintln!("{style}error:{style:#} {report:?}");
     } else {
-        eprintln!("{prefix} {}", CompactChain(report));
+        eprintln!("{style}error:{style:#} {}", CompactChain(report));
     }
 }
 
-fn error_prefix() -> &'static str {
-    // ANSI bold red. Suppressed when stderr isn't a TTY or NO_COLOR is set
-    // (https://no-color.org/).
+fn error_prefix_style() -> Style {
+    // Bold red, suppressed when stderr isn't a TTY or NO_COLOR is set
+    // (https://no-color.org/). `Style::new()` writes empty escapes, so the
+    // disabled case produces clean output.
     let use_color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     if use_color {
-        "\x1b[1;31merror:\x1b[0m"
+        Style::new().bold().fg_color(Some(AnsiColor::Red.into()))
     } else {
-        "error:"
+        Style::new()
     }
 }
 
