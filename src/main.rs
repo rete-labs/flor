@@ -3,7 +3,7 @@
 
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use error_stack::{Report, ResultExt};
 
 use flor::{
@@ -54,26 +54,29 @@ enum Cmd {
 #[derive(Subcommand, Debug)]
 enum IdAction {
     /// Generate a keypair locally and emit a CSR for the operator to sign.
-    Keygen {
-        /// Principal kind.
-        #[arg(long, value_enum)]
-        kind: Kind,
-        /// Principal name (last path segment of the SPIFFE ID).
-        #[arg(long)]
-        name: String,
-        /// Cluster trust domain (e.g. `demo.flor`).
-        #[arg(long)]
-        trust_domain: String,
-        /// Node name for node-scoped principals.
-        #[arg(long)]
-        scope: Option<String>,
-        /// Where to write the PKCS#8 PEM private key (mode 0600 on Unix).
-        #[arg(long)]
-        out_key: PathBuf,
-        /// Where to write the PEM-encoded CSR.
-        #[arg(long)]
-        out_csr: PathBuf,
-    },
+    Keygen(KeygenArgs),
+}
+
+#[derive(ClapArgs, Debug)]
+struct KeygenArgs {
+    /// Principal kind.
+    #[arg(long, value_enum)]
+    kind: Kind,
+    /// Principal name (last path segment of the SPIFFE ID).
+    #[arg(long)]
+    name: String,
+    /// Cluster trust domain (e.g. `demo.flor`).
+    #[arg(long)]
+    trust_domain: String,
+    /// Node name for node-scoped principals.
+    #[arg(long)]
+    scope: Option<String>,
+    /// Where to write the PEM-encoded private key (mode 0600 on Unix).
+    #[arg(long)]
+    out_key: PathBuf,
+    /// Where to write the PEM-encoded CSR.
+    #[arg(long)]
+    out_csr: PathBuf,
 }
 
 #[fundle::bundle]
@@ -90,63 +93,52 @@ fn main() {
     let verbose = args.verbose;
     match args.cmd {
         Cmd::Id {
-            action: IdAction::Keygen { .. },
+            action: IdAction::Keygen(keygen_args),
         } => {
-            // Synchronous path — no tokio needed.
-            if let Err(e) = run_id_keygen(args.cmd) {
+            // Synchronous path — no tokio needed
+            if let Err(e) = run_id_keygen(keygen_args) {
                 print_error(&e, verbose);
                 std::process::exit(1);
             }
         }
-        Cmd::Demo { .. } => {
+        Cmd::Demo { name } => {
             logging::logger::init(log::LevelFilter::Info).expect("Failed to initialize logger");
-            let rt = tokio::runtime::Runtime::new().expect("Failed to build tokio runtime");
-            if let Err(e) = rt.block_on(run_demo(args.cmd)) {
-                print_error(&e, verbose);
+            if let Err(e) = run_demo(name) {
+                log::error!("Demo failed: {e:?}");
                 std::process::exit(1);
             }
         }
     }
 }
 
-fn run_id_keygen(cmd: Cmd) -> Result<(), Report<Error>> {
-    let Cmd::Id {
-        action:
-            IdAction::Keygen {
-                kind,
-                name,
-                trust_domain,
-                scope,
-                out_key,
-                out_csr,
-            },
-    } = cmd
-    else {
-        unreachable!()
-    };
-
-    let td =
-        TrustDomain::new(&trust_domain).change_context(Error("Invalid trust domain".into()))?;
-    let id = build_id(&td, kind, &name, scope.as_deref())
+fn run_id_keygen(args: KeygenArgs) -> Result<(), Report<Error>> {
+    let td = TrustDomain::new(&args.trust_domain)
+        .change_context(Error("Invalid trust domain".into()))?;
+    let id = build_id(&td, args.kind, &args.name, args.scope.as_deref())
         .change_context(Error("Failed to build SPIFFE ID".into()))?;
     let (key, csr_pem) = keygen_csr(&id).change_context(Error("Keygen failed".into()))?;
 
-    write_secret(&out_key, key.serialize_pem().as_bytes())
+    write_secret(&args.out_key, key.serialize_pem().as_bytes())
         .change_context(Error("Failed to write private key".into()))?;
-    std::fs::write(&out_csr, csr_pem.as_bytes())
-        .change_context_lazy(|| Error(format!("Failed to write CSR to {}", out_csr.display())))?;
+    std::fs::write(&args.out_csr, csr_pem.as_bytes()).change_context_lazy(|| {
+        Error(format!("Failed to write CSR to {}", args.out_csr.display()))
+    })?;
 
     println!("SPIFFE ID: {id}");
-    println!("Key:       {}", out_key.display());
-    println!("CSR:       {}", out_csr.display());
+    println!("Key:       {}", args.out_key.display());
+    println!("CSR:       {}", args.out_csr.display());
     Ok(())
 }
 
-async fn run_demo(cmd: Cmd) -> Result<(), Report<Error>> {
-    let Cmd::Demo { name: node_name } = cmd else {
-        unreachable!()
-    };
+fn run_demo(node_name: String) -> Result<(), Report<Error>> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .change_context(Error("Failed to build tokio runtime".into()))?;
+    rt.block_on(demo_main(node_name))
+}
 
+async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
     // Initial version uses workload names instead of identities.
     // Node configuration: (quic_addr, served_workloads, socks5_addr)
     let service_map = HashMap::from([

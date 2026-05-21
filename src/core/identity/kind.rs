@@ -10,7 +10,7 @@
 //! - Node-scoped (only for `service` and `vertex`): `/service/alpha/db`,
 //!   `/vertex/alpha/flor`.
 //!
-//! All six kinds are recognised from day one (see ADR 0005). The CLI segments
+//! All six kinds are recognised from day one (see ADR-0005). The CLI segments
 //! are singular and match the Rust variant names: `Kind::ControlPlane` ↔
 //! `control-plane` ↔ `--kind control-plane`.
 
@@ -22,15 +22,25 @@ use error_stack::{Report, bail};
 use crate::core::identity::{Error, SpiffeId};
 
 /// The class of principal a SPIFFE ID names.
+///
+/// `Kind` is the *cert-shape* axis: it determines the X.509 extension policy
+/// applied at signing and how the URI is parsed. It is intentionally
+/// orthogonal to [`Scope`], which is the *deployment-placement* axis (where a
+/// principal lives in the cluster). Most identity-layer code (cert issuance,
+/// audit, ACL evaluation) dispatches on `Kind` and doesn't care about
+/// scope; deployment-layer code is where placement matters.
+/// Resist the urge to merge these axes — see ADR-0005.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
 pub enum Kind {
-    /// A human operator or end user.
+    /// A human user.
     User,
-    /// A workload (process) running on a node.
+    /// A service — one or more workloads that expose endpoints.
+    /// Cluster-scoped services may be backed by multiple workloads (load
+    /// balanced across hosts); node-scoped services are bound to one host.
     Service,
     /// A physical or virtual host enrolled into the cluster.
     Node,
-    /// A Florete vertex — a transport endpoint hosted on a node.
+    /// A vertex — a special kind of service that provides Florete IPC.
     Vertex,
     /// A control-plane signing identity. Not used for mTLS.
     ControlPlane,
@@ -51,11 +61,41 @@ impl Kind {
         }
     }
 
-    /// Whether this kind can be bound to a specific node (node-scoped) or is
-    /// always cluster-scoped. Only `Service` and `Vertex` exist on a particular
-    /// node; everything else is cluster-wide.
-    pub const fn supports_node_scope(self) -> bool {
-        matches!(self, Self::Service | Self::Vertex)
+    /// If this kind can be bound to a specific node, return its
+    /// [`NodeScopableKind`] form; otherwise `None`. Use this at the boundary
+    /// (CLI, config parsing) to safely turn an unrestricted `Kind` into the
+    /// subset accepted by [`build_id_on_node`](super::build_id_on_node).
+    pub const fn into_node_scopable(self) -> Option<NodeScopableKind> {
+        match self {
+            Self::Service => Some(NodeScopableKind::Service),
+            Self::Vertex => Some(NodeScopableKind::Vertex),
+            Self::User | Self::Node | Self::ControlPlane | Self::ManagementPlane => None,
+        }
+    }
+}
+
+/// The subset of [`Kind`] that can be bound to a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NodeScopableKind {
+    Service,
+    Vertex,
+}
+
+impl From<NodeScopableKind> for Kind {
+    fn from(k: NodeScopableKind) -> Self {
+        match k {
+            NodeScopableKind::Service => Self::Service,
+            NodeScopableKind::Vertex => Self::Vertex,
+        }
+    }
+}
+
+impl NodeScopableKind {
+    pub const fn as_segment(self) -> &'static str {
+        match self {
+            Self::Service => Kind::Service.as_segment(),
+            Self::Vertex => Kind::Vertex.as_segment(),
+        }
     }
 }
 
@@ -83,7 +123,8 @@ impl FromStr for Kind {
     }
 }
 
-/// Where a principal lives in the cluster.
+/// Where a principal lives in the cluster — the *deployment-placement* axis,
+/// orthogonal to [`Kind`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Scope {
     /// Cluster-wide principal (not bound to a specific node).
@@ -115,17 +156,19 @@ pub fn kind_of(id: &SpiffeId) -> Result<Kind, Report<Error>> {
 pub fn scope_of(id: &SpiffeId) -> Result<Scope, Report<Error>> {
     let kind = kind_of(id)?;
     let trailing: Vec<&str> = path_segments(id).skip(1).collect();
-    match (trailing.as_slice(), kind.supports_node_scope()) {
+    let node_scopable = kind.into_node_scopable().is_some();
+    match (trailing.as_slice(), node_scopable) {
         ([_name], _) => Ok(Scope::Cluster),
         ([node, _name], true) => Ok(Scope::Node((*node).to_string())),
         _ => {
-            let expected = if kind.supports_node_scope() {
+            let expected = if node_scopable {
                 "1 (cluster) or 2 (node-scoped) trailing segments"
             } else {
                 "1 trailing segment"
             };
             bail!(Error::new(format!(
-                "SPIFFE ID path {:?} has wrong shape for {kind}: expected {expected}, got {} trailing segment(s)",
+                "SPIFFE ID path {:?} has wrong shape for {kind}: \
+                 expected {expected}, got {} trailing segment(s)",
                 id.path(),
                 trailing.len(),
             )))
