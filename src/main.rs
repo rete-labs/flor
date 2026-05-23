@@ -7,17 +7,20 @@ use clap::{Args as ClapArgs, Parser, Subcommand};
 use error_stack::{Report, ResultExt};
 
 use flor::{
-    AddrMap, AppConfigBundle, EndpointAddr, Socks5Addr,
+    AddrMap, AppConfigBundle, EndpointAddr, Socks5Addr, TcpDirectTargets,
     cli::{print_error, write_secret},
     core::{
         identity::{Kind, TrustDomain, build_id, keygen_csr},
         transport::{
-            QuicConnector, TransportBundle,
+            QuicConnector, QuicPublisher, TransportBundle,
             endpoint::connection::{Accept, Open},
         },
     },
     logging,
-    northbound::inbound::{Error as InboundError, InboundBundle},
+    northbound::{
+        inbound::{Error as InboundError, InboundBundle},
+        outbound::{Error as OutboundError, OutboundBundle},
+    },
     utils::report::ErrorReport,
 };
 
@@ -45,8 +48,8 @@ enum Cmd {
     },
     /// Run the demo (legacy, replaced by `agent run` once the daemon lands).
     Demo {
-        /// Select node config: Alpha, Beta, or Gamma
-        #[arg(long, default_value = "Alpha", value_parser = ["Alpha", "Beta", "Gamma"])]
+        /// Select node config: Alpha, Beta, Gamma, or Delta
+        #[arg(long, default_value = "Alpha", value_parser = ["Alpha", "Beta", "Gamma", "Delta"])]
         name: String,
     },
 }
@@ -81,11 +84,12 @@ struct KeygenArgs {
 
 #[fundle::bundle]
 struct AppBundle {
-    #[forward(EndpointAddr, AddrMap, Option<Socks5Addr>)]
+    #[forward(EndpointAddr, AddrMap, Option<Socks5Addr>, TcpDirectTargets)]
     pub config: AppConfigBundle,
-    #[forward(QuicConnector)]
+    #[forward(QuicConnector, QuicPublisher)]
     pub transport: TransportBundle,
     pub inbound: InboundBundle,
+    pub outbound: OutboundBundle,
 }
 
 fn main() {
@@ -139,15 +143,17 @@ fn run_demo(node_name: String) -> Result<(), Report<Error>> {
 }
 
 async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
-    // Initial version uses workload names instead of identities.
-    // Node configuration: (quic_addr, served_workloads, socks5_addr)
+    // Initial demo services use workload names; TCP direct services use DNS-style names.
+    // The transport currently uses service names directly as QUIC TLS SNI values.
+    // Node configuration: (quic_addr, demo_served_workloads, socks5_addr, tcp_direct_targets)
     let service_map = HashMap::from([
         (
             "Alpha",
             (
                 "127.0.0.1:31337".parse::<SocketAddr>().unwrap(),
-                vec!["alice"],
+                vec!["alice", "eve"],
                 Some("127.0.0.1:1080".parse::<SocketAddr>().unwrap()),
+                HashMap::new(),
             ),
         ),
         (
@@ -156,6 +162,7 @@ async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
                 "127.0.0.1:31338".parse::<SocketAddr>().unwrap(),
                 vec!["bob"],
                 None,
+                HashMap::new(),
             ),
         ),
         (
@@ -164,14 +171,31 @@ async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
                 "127.0.0.1:31339".parse::<SocketAddr>().unwrap(),
                 vec!["carol"],
                 None,
+                HashMap::new(),
+            ),
+        ),
+        (
+            "Delta",
+            (
+                "127.0.0.1:31440".parse::<SocketAddr>().unwrap(),
+                vec![],
+                None,
+                HashMap::from([(
+                    "tcp-echo.demo.flor.local".to_string(),
+                    "127.0.0.1:32440".parse::<SocketAddr>().unwrap(),
+                )]),
             ),
         ),
     ]);
     // Directed workload connections: (client, server)
-    let conn_list = vec![("alice", "bob"), ("carol", "bob")];
+    let conn_list = vec![
+        ("alice", "bob"),
+        ("carol", "bob"),
+        ("eve", "tcp-echo.demo.flor.local"),
+    ];
 
     // Get current node config
-    let (local_addr, served, socks5_addr) = service_map
+    let (local_addr, served, socks5_addr, tcp_direct_targets) = service_map
         .get(node_name.as_str())
         .ok_or_else(|| Report::new(Error("Node not found in predefined service map".into())))?;
 
@@ -185,11 +209,11 @@ async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
     // For each service a node hosts, emit (service_name, node_addr)
     let addr_map: HashMap<String, SocketAddr> = service_map
         .iter()
-        .flat_map(|(_node, (addr, services, _socks5))| {
-            services
-                .iter()
-                .map(move |svc| (svc.to_string(), *addr))
-                .collect::<Vec<_>>()
+        .flat_map(|(_node, (addr, services, _socks5, tcp_targets))| {
+            let demo_services = services.iter().map(move |svc| (svc.to_string(), *addr));
+            let tcp_direct_services = tcp_targets.keys().map(move |svc| (svc.to_string(), *addr));
+
+            demo_services.chain(tcp_direct_services).collect::<Vec<_>>()
         })
         .collect();
 
@@ -201,25 +225,33 @@ async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
             endpoint_addr: EndpointAddr(*local_addr),
             addr_map: AddrMap(addr_map.clone()),
             socks5_addr: socks5_addr.map(Socks5Addr),
+            tcp_direct_targets: TcpDirectTargets(tcp_direct_targets.clone()),
         })
         .transport_try(|b| TransportBundle::try_new(b))
         .change_context_lazy(bundle_err)?
         .inbound_try_async(init_inbound)
         .await
         .change_context_lazy(bundle_err)?
+        .outbound_try_async(init_outbound)
+        .await
+        .change_context_lazy(bundle_err)?
         .build();
 
-    let mut acceptor = app
-        .transport
-        .endpoint_publisher
-        .publish(served_names.clone())
-        .await
-        .change_context(Error("Failed to publish served services".into()))?;
-    let acceptor_handle = tokio::spawn(async move {
-        while let Some((service_name, conn)) = acceptor.accept().await {
-            tokio::spawn(handle_connection(service_name, conn));
-        }
-    });
+    let acceptor_handle = if served_names.is_empty() {
+        None
+    } else {
+        let mut acceptor = app
+            .transport
+            .endpoint_publisher
+            .publish(served_names.clone())
+            .await
+            .change_context(Error("Failed to publish served services".into()))?;
+        Some(tokio::spawn(async move {
+            while let Some((service_name, conn)) = acceptor.accept().await {
+                tokio::spawn(handle_connection(service_name, conn));
+            }
+        }))
+    };
 
     // Fire-and-forget client connections; server keeps the process alive
     for (src, dst) in &conn_list {
@@ -237,9 +269,15 @@ async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
 
     let endpoint_handle = app.transport.endpoint_handle;
     let socks5_handle = app.inbound.socks5_handle;
+    let tcp_direct_handle = app.outbound.tcp_direct_handle;
 
     tokio::select! {
-        result = acceptor_handle => {
+        result = async {
+            match acceptor_handle {
+                Some(h) => h.await,
+                None => std::future::pending().await,
+            }
+        } => {
             if let Err(e) = result {
                 log::error!("Acceptor task failed: {e:?}");
             }
@@ -257,6 +295,16 @@ async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
         } => {
             if let Err(e) = result {
                 log::error!("Socks5 task failed: {e:?}");
+            }
+        }
+        result = async {
+            match tcp_direct_handle {
+                Some(h) => h.wait().await,
+                None => std::future::pending().await,
+            }
+        } => {
+            if let Err(e) = result {
+                log::error!("TCP direct outbound task failed: {e:?}");
             }
         }
     }
@@ -363,7 +411,14 @@ async fn initiate_connection(
 
 // Workaround to avoid rust-analyzer issue with async closures.
 async fn init_inbound(
-    b: &AppBundleBuilder<fundle::Read, fundle::Set, fundle::Set, fundle::NotSet>,
+    b: &AppBundleBuilder<fundle::Read, fundle::Set, fundle::Set, fundle::NotSet, fundle::NotSet>,
 ) -> Result<InboundBundle, ErrorReport<InboundError>> {
     InboundBundle::try_new(b).await
+}
+
+// Workaround to avoid rust-analyzer issue with async closures.
+async fn init_outbound(
+    b: &AppBundleBuilder<fundle::Read, fundle::Set, fundle::Set, fundle::Set, fundle::NotSet>,
+) -> Result<OutboundBundle, ErrorReport<OutboundError>> {
+    OutboundBundle::try_new(b).await
 }

@@ -18,6 +18,9 @@ pub struct AddrMap(pub HashMap<String, SocketAddr>);
 #[derive(Debug, Clone)]
 pub struct Socks5Addr(pub SocketAddr);
 
+#[derive(Debug, Clone)]
+pub struct TcpDirectTargets(pub HashMap<String, SocketAddr>);
+
 /// Fundle DI container for the entire application configuration.
 ///
 /// - `endpoint_addr`: UDP address to bind the QUIC endpoint to.
@@ -28,4 +31,5 @@ pub struct AppConfigBundle {
     pub endpoint_addr: EndpointAddr,
     pub addr_map: AddrMap,
     pub socks5_addr: Option<Socks5Addr>,
+    pub tcp_direct_targets: TcpDirectTargets,
 }
