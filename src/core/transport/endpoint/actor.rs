@@ -6,7 +6,7 @@ use std::{collections::HashMap, sync::RwLock};
 use error_stack::{IntoReport, Report, ResultExt};
 use tokio::{
     sync::{mpsc, oneshot},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 
 use crate::{
@@ -163,9 +163,12 @@ impl QuicEndpointActor {
         )
     }
 
-    async fn handle_connect(&self, msg: ConnectMsg) {
-        let result = self.endpoint.connect(&msg.service).await;
-        let _ = msg.reply.send(result);
+    fn handle_connect(&self, msg: ConnectMsg, connect_tasks: &mut JoinSet<()>) {
+        let endpoint = self.endpoint.clone();
+        connect_tasks.spawn(async move {
+            let result = endpoint.connect(&msg.service).await;
+            let _ = msg.reply.send(result);
+        });
     }
 
     fn cleanup_stale(&mut self) {
@@ -228,10 +231,12 @@ impl QuicEndpointActor {
         mut connect_rx: mpsc::Receiver<ConnectMsg>,
         mut publish_rx: mpsc::Receiver<PublishMsg>,
     ) {
+        let mut connect_tasks = JoinSet::new();
+
         loop {
             tokio::select! {
                 Some(msg) = connect_rx.recv() => {
-                    self.handle_connect(msg).await;
+                    self.handle_connect(msg, &mut connect_tasks);
                 },
                 Some(msg) = publish_rx.recv() => {
                     self.handle_publish(msg);
@@ -243,6 +248,11 @@ impl QuicEndpointActor {
                     None => {
                         log::debug!("QuicEndpointActor: endpoint is closed, shutting down");
                         break;
+                    }
+                },
+                Some(result) = connect_tasks.join_next() => {
+                    if let Err(e) = result {
+                        log::debug!("QuicEndpointActor: connect task failed: {e:?}");
                     }
                 },
             }
