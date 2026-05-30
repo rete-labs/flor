@@ -8,7 +8,7 @@ use fast_socks5::util::target_addr::TargetAddr;
 use fast_socks5::{ReplyError, Socks5Command};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -215,17 +215,20 @@ async fn handle_socks5(
 
     log::debug!(target: LOG_TARGET, "Relaying traffic for '{target}'");
 
-    tokio::select! {
-        res = tokio::io::copy(&mut client_read, &mut quic_send) => {
-            if let Err(e) = res {
-                log::debug!(target: LOG_TARGET, "Client->QUIC relay error for '{target}': {e:?}");
-            }
-        }
-        res = tokio::io::copy(&mut quic_recv, &mut client_write) => {
-            if let Err(e) = res {
-                log::debug!(target: LOG_TARGET, "QUIC->Client relay error for '{target}': {e:?}");
-            }
-        }
+    let client_to_quic = async {
+        let _ = tokio::io::copy(&mut client_read, &mut quic_send).await?;
+        quic_send.shutdown().await
+    };
+    let quic_to_client = async {
+        let _ = tokio::io::copy(&mut quic_recv, &mut client_write).await?;
+        client_write.shutdown().await
+    };
+    let (client_to_quic, quic_to_client) = tokio::join!(client_to_quic, quic_to_client);
+    if let Err(e) = client_to_quic {
+        log::debug!(target: LOG_TARGET, "Client->QUIC relay error for '{target}': {e:?}");
+    }
+    if let Err(e) = quic_to_client {
+        log::debug!(target: LOG_TARGET, "QUIC->Client relay error for '{target}': {e:?}");
     }
 
     Ok(())
@@ -481,5 +484,16 @@ mod tests {
             .expect("timeout")
             .unwrap();
         assert_eq!(&buf, b"hello from client");
+
+        // A client such as `printf ... | nc` closes its write half immediately after sending.
+        // The reverse relay must remain alive long enough to deliver the backend response.
+        client.shutdown().await.unwrap();
+        backend_stream.write_all(b"reply after eof").await.unwrap();
+        let mut buf = vec![0u8; 15];
+        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut buf))
+            .await
+            .expect("timeout")
+            .unwrap();
+        assert_eq!(&buf, b"reply after eof");
     }
 }
