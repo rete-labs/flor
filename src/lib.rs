@@ -16,7 +16,7 @@ pub struct EndpointAddr(pub SocketAddr);
 pub struct AddrMap(pub HashMap<String, SocketAddr>);
 
 #[derive(Debug, Clone)]
-pub struct Socks5Addr(pub SocketAddr);
+pub struct Socks5Targets(pub HashMap<String, SocketAddr>);
 
 #[derive(Debug, Clone)]
 pub struct TcpDirectTargets(pub HashMap<String, SocketAddr>);
@@ -30,9 +30,9 @@ pub struct AppConfigBundle {
     /// A mapping of service names to their remote UDP addresses.
     pub addr_map: AddrMap,
 
-    /// If present, the local address to bind the SOCKS5 inbound listener to.
-    pub socks5_addr: Option<Socks5Addr>,
+    /// A mapping of client service names to local SOCKS5 inbound addresses.
+    pub socks5_targets: Socks5Targets,
 
-    /// A mapping of service names to their remote TCP addresses for TCP direct outbound.
+    /// A mapping of client service names to local TCP direct target addresses.
     pub tcp_direct_targets: TcpDirectTargets,
 }
