@@ -7,7 +7,7 @@ use clap::{Args as ClapArgs, Parser, Subcommand};
 use error_stack::{Report, ResultExt};
 
 use flor::{
-    AddrMap, AppConfigBundle, EndpointAddr, Socks5Addr, TcpDirectTargets,
+    AddrMap, AppConfigBundle, EndpointAddr, Socks5Targets, TcpDirectTargets,
     cli::{print_error, write_secret},
     core::{
         identity::{Kind, TrustDomain, build_id, keygen_csr},
@@ -81,7 +81,7 @@ struct KeygenArgs {
 
 #[fundle::bundle]
 struct AppBundle {
-    #[forward(EndpointAddr, AddrMap, Option<Socks5Addr>, TcpDirectTargets)]
+    #[forward(EndpointAddr, AddrMap, Socks5Targets, TcpDirectTargets)]
     pub config: AppConfigBundle,
     #[forward(QuicConnector, QuicPublisher)]
     pub transport: TransportBundle,
@@ -148,8 +148,11 @@ async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
             "Alpha", // node name
             (
                 "127.0.0.1:31337".parse::<SocketAddr>().unwrap(), // QUIC address
-                vec![("alice", "127.0.0.1:1080".parse::<SocketAddr>().unwrap())], // SOCKS5 workloads
-                vec![], // TCP services (none on Alpha)
+                vec![
+                    ("alice", "127.0.0.1:1080".parse::<SocketAddr>().unwrap()),
+                    ("bob", "127.0.0.1:1081".parse::<SocketAddr>().unwrap()),
+                ], // SOCKS5 workloads
+                vec![],                                           // TCP services (none on Alpha)
             ),
         ),
         (
@@ -169,7 +172,10 @@ async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
     let (quic_addr, socks5_inbounds, tcp_outbounds) = service_map
         .get(node_name.as_str())
         .ok_or_else(|| Report::new(Error("Node not found in predefined service map".into())))?;
-    let socks5_addr = socks5_inbounds.first().map(|(_workload, addr)| *addr);
+    let socks5_targets = socks5_inbounds
+        .iter()
+        .map(|(workload, addr)| (workload.to_string(), *addr))
+        .collect::<HashMap<_, _>>();
     let tcp_direct_targets = tcp_outbounds.iter().cloned().collect::<HashMap<_, _>>();
 
     log::info!(
@@ -208,7 +214,7 @@ async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
         .config(|_| AppConfigBundle {
             endpoint_addr: EndpointAddr(*quic_addr),
             addr_map: AddrMap(addr_map.clone()),
-            socks5_addr: socks5_addr.map(Socks5Addr),
+            socks5_targets: Socks5Targets(socks5_targets.clone()),
             tcp_direct_targets: TcpDirectTargets(tcp_direct_targets.clone()),
         })
         .transport_try(|b| TransportBundle::try_new(b))

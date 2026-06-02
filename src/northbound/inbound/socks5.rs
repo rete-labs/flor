@@ -6,6 +6,7 @@ use error_stack::{FutureExt, IntoReport, Report, ResultExt, bail};
 use fast_socks5::server::Socks5ServerProtocol;
 use fast_socks5::util::target_addr::TargetAddr;
 use fast_socks5::{ReplyError, Socks5Command};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -79,41 +80,39 @@ impl QuicBackend for QuicConnector {
 
 /// Lifecycle handle for a running [`Socks5Inbound`].
 ///
-/// Dropping this handle aborts the accept loop and all in-flight connections.
+/// Dropping this handle aborts the accept loops and all in-flight connections.
 /// Call [`shutdown`](Self::shutdown) to also await full termination of the accept
-/// loop task.
+/// loop tasks.
 pub struct Socks5Handle(LifecycleHandle);
 
 impl_lifecycle_handle!(Socks5Handle);
 
 /// SOCKS5 inbound component.
 ///
-/// Accepts TCP connections, performs the SOCKS5 handshake, then forwards each
-/// `TCP_CONNECT` request to the given [`QuicConnector`]. The domain name from
-/// the SOCKS5 target address is used directly as the QUIC service name.
+/// Accepts TCP connections on client-specific listeners, performs the SOCKS5
+/// handshake, then forwards each `TCP_CONNECT` request to the given
+/// [`QuicConnector`]. The domain name from the SOCKS5 target address is used
+/// directly as the QUIC service name.
 ///
 /// # Lifecycle
 ///
 /// Call [`spawn`](Self::spawn) to start and obtain a [`Socks5Handle`].
-/// Dropping the handle stops the accept loop.
+/// Dropping the handle stops all accept loops.
 pub struct Socks5Inbound {
-    listener: TcpListener,
+    listeners: HashMap<String, TcpListener>,
     backend: Arc<dyn QuicBackend>,
 }
 
 impl Socks5Inbound {
-    /// Bind to `listen_addr` and return a component ready to be started via [`spawn`](Self::spawn).
+    /// Bind client-specific listeners and return a component ready to be started via
+    /// [`spawn`](Self::spawn).
     pub async fn new(
-        listen_addr: SocketAddr,
+        targets: HashMap<String, SocketAddr>,
         connector: QuicConnector,
     ) -> Result<Self, Report<Error>> {
-        let listener = TcpListener::bind(listen_addr)
-            .await
-            .change_context_lazy(|| {
-                Error(format!("Failed to bind SOCKS5 server to {listen_addr}"))
-            })?;
+        let listeners = bind_listeners(targets).await?;
         Ok(Self {
-            listener,
+            listeners,
             backend: Arc::new(connector),
         })
     }
@@ -125,31 +124,64 @@ impl Socks5Inbound {
 
     async fn run(self) {
         let mut tasks = JoinSet::new();
-        loop {
-            tokio::select! {
-                result = self.listener.accept() => match result {
-                    Ok((stream, peer_addr)) => {
-                        log::debug!(target: LOG_TARGET, "Accepted connection from {peer_addr}");
-                        let backend = self.backend.clone();
-                        tasks.spawn(async move {
-                            if let Err(e) = handle_socks5(stream, backend).await {
-                                log::warn!(target: LOG_TARGET,
-                                    "Connection from {peer_addr} error: {e:?}");
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        log::error!(target: LOG_TARGET, "Accept error: {e:?}");
-                        break;
-                    }
-                },
-
-                // Reap finished tasks to keep the set bounded.
-                Some(_) = tasks.join_next() => {}
-            }
+        for (service_name, listener) in self.listeners {
+            let backend = self.backend.clone();
+            tasks.spawn(run_listener(service_name, listener, backend));
         }
-        // Dropping JoinSet here aborts all in-flight connection tasks.
+
+        // Any listener stopping terminates the whole inbound. Dropping the set
+        // aborts the remaining listeners and their in-flight connections.
+        let _ = tasks.join_next().await;
     }
+}
+
+async fn bind_listeners(
+    targets: HashMap<String, SocketAddr>,
+) -> Result<HashMap<String, TcpListener>, Report<Error>> {
+    let mut listeners = HashMap::with_capacity(targets.len());
+    for (service_name, listen_addr) in targets {
+        let listener = TcpListener::bind(listen_addr)
+            .await
+            .change_context_lazy(|| {
+                Error(format!(
+                    "Failed to bind SOCKS5 service '{service_name}' to {listen_addr}"
+                ))
+            })?;
+        listeners.insert(service_name, listener);
+    }
+    Ok(listeners)
+}
+
+async fn run_listener(service_name: String, listener: TcpListener, backend: Arc<dyn QuicBackend>) {
+    let mut tasks = JoinSet::new();
+    loop {
+        tokio::select! {
+            result = listener.accept() => match result {
+                Ok((stream, peer_addr)) => {
+                    log::debug!(target: LOG_TARGET,
+                        "Accepted connection from {peer_addr} via SOCKS5 service '{service_name}'");
+                    let backend = backend.clone();
+                    let service_name = service_name.clone();
+                    tasks.spawn(async move {
+                        if let Err(e) = handle_socks5(stream, backend).await {
+                            log::warn!(target: LOG_TARGET,
+                                "Connection from {peer_addr} via SOCKS5 service '{service_name}'
+                                error: {e:?}");
+                        }
+                    });
+                }
+                Err(e) => {
+                    log::error!(target: LOG_TARGET,
+                        "SOCKS5 service '{service_name}' accept error: {e:?}");
+                    break;
+                }
+            },
+
+            // Reap finished tasks to keep the set bounded.
+            Some(_) = tasks.join_next() => {}
+        }
+    }
+    // Dropping JoinSet here aborts all in-flight connection tasks.
 }
 
 /// Handles a single SOCKS5 connection: performs the handshake, opens connection to the target,
@@ -251,8 +283,18 @@ mod tests {
     }
 
     fn inbound(listener: TcpListener, backend: impl QuicBackend + 'static) -> Socks5Inbound {
+        inbound_with_listeners(
+            HashMap::from([("test-client".to_string(), listener)]),
+            backend,
+        )
+    }
+
+    fn inbound_with_listeners(
+        listeners: HashMap<String, TcpListener>,
+        backend: impl QuicBackend + 'static,
+    ) -> Socks5Inbound {
         Socks5Inbound {
-            listener,
+            listeners,
             backend: Arc::new(backend),
         }
     }
@@ -355,11 +397,38 @@ mod tests {
     // --- Tests ---
 
     #[tokio::test]
-    async fn test_actor_binds_and_accepts() {
-        let (listener, addr) = bound_listener().await;
-        let _handle = inbound(listener, MockFailingQuicBackend).spawn();
+    async fn test_actor_accepts_on_all_listeners() {
+        let (alice_listener, alice_addr) = bound_listener().await;
+        let (bob_listener, bob_addr) = bound_listener().await;
+        let _handle = inbound_with_listeners(
+            HashMap::from([
+                ("alice".to_string(), alice_listener),
+                ("bob".to_string(), bob_listener),
+            ]),
+            MockFailingQuicBackend,
+        )
+        .spawn();
 
-        TcpStream::connect(addr).await.unwrap();
+        TcpStream::connect(alice_addr).await.unwrap();
+        TcpStream::connect(bob_addr).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_bind_failure_releases_previously_bound_listeners() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let result = bind_listeners(HashMap::from([
+            ("alice".to_string(), addr),
+            ("bob".to_string(), addr),
+        ]))
+        .await;
+        assert!(result.is_err(), "duplicate listen address must fail");
+
+        TcpListener::bind(addr)
+            .await
+            .expect("listener bound before the error must be released");
     }
 
     #[tokio::test]
@@ -427,22 +496,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_dropped_stops_actor() {
-        let (listener, addr) = bound_listener().await;
-        let handle = inbound(listener, MockFailingQuicBackend).spawn();
+    async fn test_shutdown_stops_all_listeners() {
+        let (alice_listener, alice_addr) = bound_listener().await;
+        let (bob_listener, bob_addr) = bound_listener().await;
+        let handle = inbound_with_listeners(
+            HashMap::from([
+                ("alice".to_string(), alice_listener),
+                ("bob".to_string(), bob_listener),
+            ]),
+            MockFailingQuicBackend,
+        )
+        .spawn();
 
-        // Actor is running — connection should succeed
-        TcpStream::connect(addr).await.unwrap();
+        // Actor is running: connections to both listeners should succeed.
+        TcpStream::connect(alice_addr).await.unwrap();
+        TcpStream::connect(bob_addr).await.unwrap();
 
-        // Drop handle — actor shuts down
+        // Shutting down the handle stops both listeners.
         let _ = handle.shutdown().await;
 
-        // New connections should be refused now
-        let result = tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(addr)).await;
-        assert!(
-            result.is_err() || result.unwrap().is_err(),
-            "connections should fail after shutdown"
-        );
+        for addr in [alice_addr, bob_addr] {
+            let result =
+                tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(addr)).await;
+            assert!(
+                result.is_err() || result.unwrap().is_err(),
+                "connections to {addr} should fail after shutdown"
+            );
+        }
     }
 
     #[tokio::test]
