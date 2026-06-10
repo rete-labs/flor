@@ -3,20 +3,16 @@
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use async_trait::async_trait;
 use error_stack::{Report, ResultExt};
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
     net::TcpStream,
     task::{JoinHandle, JoinSet},
 };
 
 use crate::{
-    core::transport::{
-        QuicAcceptor, QuicPublisher,
-        endpoint::connection::{Accept, QuicConnection},
-    },
+    core::transport::{QuicAcceptor, QuicPublisher},
     impl_lifecycle_handle,
+    northbound::outbound::{QuicInboundConnection, QuicStream},
     utils::lifecycle::LifecycleHandle,
 };
 
@@ -25,26 +21,6 @@ const LOG_TARGET: &str = "tcp_direct_outbound";
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct Error(String);
-
-trait QuicStream: AsyncRead + AsyncWrite + Unpin + Send {}
-
-impl<T> QuicStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
-
-#[async_trait]
-trait QuicInboundConnection: Send + Sync {
-    async fn accept_stream(&self) -> Result<Box<dyn QuicStream>, Report<Error>>;
-}
-
-#[async_trait]
-impl QuicInboundConnection for QuicConnection {
-    async fn accept_stream(&self) -> Result<Box<dyn QuicStream>, Report<Error>> {
-        let (send, recv) = self
-            .accept_bi()
-            .await
-            .change_context(Error("QUIC stream accept failed".into()))?;
-        Ok(Box::new(tokio::io::join(recv, send)))
-    }
-}
 
 /// Lifecycle handle for a running [`TcpDirectOutbound`].
 ///
@@ -189,6 +165,8 @@ async fn relay_stream(
 mod tests {
     use std::{collections::VecDeque, time::Duration};
 
+    use async_trait::async_trait;
+    use error_stack::Report;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex, oneshot};
@@ -237,7 +215,9 @@ mod tests {
 
     #[async_trait]
     impl QuicInboundConnection for MockQuicConnection {
-        async fn accept_stream(&self) -> Result<Box<dyn QuicStream>, Report<Error>> {
+        async fn accept_stream(
+            &self,
+        ) -> Result<Box<dyn QuicStream>, Report<crate::northbound::outbound::Error>> {
             let stream = self.streams.lock().await.pop_front();
             match stream {
                 Some(stream) => Ok(Box::new(stream)),

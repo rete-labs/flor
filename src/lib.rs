@@ -22,14 +22,17 @@ pub struct Socks5Addr(pub SocketAddr);
 pub struct TcpDirectTargets(pub HashMap<String, SocketAddr>);
 
 /// Fundle DI container for the entire application configuration.
-///
-/// - `endpoint_addr`: UDP address to bind the QUIC endpoint to.
-/// - `addr_map`: maps service names to their remote UDP addresses.
-/// - `socks5_addr`: if present, the local address to bind the SOCKS5 listener to.
 #[fundle::bundle]
 pub struct AppConfigBundle {
+    /// The UDP address to bind the QUIC endpoint to.
     pub endpoint_addr: EndpointAddr,
+
+    /// A mapping of service names to their remote UDP addresses.
     pub addr_map: AddrMap,
+
+    /// If present, the local address to bind the SOCKS5 inbound listener to.
     pub socks5_addr: Option<Socks5Addr>,
+
+    /// A mapping of service names to their remote TCP addresses for TCP direct outbound.
     pub tcp_direct_targets: TcpDirectTargets,
 }
