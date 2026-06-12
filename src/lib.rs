@@ -1,25 +1,14 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-use std::{collections::HashMap, net::SocketAddr};
-
 pub mod cli;
 pub mod core;
 pub mod logging;
 pub mod northbound;
 pub mod utils;
 
-#[derive(Debug, Clone)]
-pub struct EndpointAddr(pub SocketAddr);
-
-#[derive(Debug, Clone)]
-pub struct AddrMap(pub HashMap<String, SocketAddr>);
-
-#[derive(Debug, Clone)]
-pub struct Socks5Targets(pub HashMap<String, SocketAddr>);
-
-#[derive(Debug, Clone)]
-pub struct TcpDirectTargets(pub HashMap<String, SocketAddr>);
+use core::transport::{AddrMap, EndpointAddr};
+use northbound::{inbound::Socks5Bindings, outbound::TcpDirectBindings};
 
 /// Fundle DI container for the entire application configuration.
 #[fundle::bundle]
@@ -31,8 +20,8 @@ pub struct AppConfigBundle {
     pub addr_map: AddrMap,
 
     /// A mapping of client service names to local SOCKS5 inbound addresses.
-    pub socks5_targets: Socks5Targets,
+    pub socks5_bindings: Socks5Bindings,
 
-    /// A mapping of client service names to local TCP direct target addresses.
-    pub tcp_direct_targets: TcpDirectTargets,
+    /// A mapping of client service names to local TCP direct addresses.
+    pub tcp_direct_bindings: TcpDirectBindings,
 }

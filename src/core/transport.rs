@@ -1,7 +1,7 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-use std::sync::Arc;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use error_stack::ResultExt;
 
@@ -14,7 +14,13 @@ mod insecure_server_verifier;
 pub use endpoint::{QuicAcceptor, QuicConnector, QuicHandle, QuicPublisher};
 pub use udp_resolver::UdpResolver;
 
-use crate::{AddrMap, EndpointAddr, utils::report::ErrorReport};
+use crate::utils::report::ErrorReport;
+
+#[derive(Debug, Clone)]
+pub struct EndpointAddr(pub SocketAddr);
+
+#[derive(Debug, Clone)]
+pub struct AddrMap(pub HashMap<String, SocketAddr>);
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]

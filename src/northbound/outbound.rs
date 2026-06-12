@@ -1,12 +1,13 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
+use std::{collections::HashMap, net::SocketAddr};
+
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
-    TcpDirectTargets,
     core::transport::{
         QuicPublisher,
         endpoint::connection::{Accept, QuicConnection},
@@ -20,6 +21,9 @@ pub mod tcp;
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct Error(String);
+
+#[derive(Debug, Clone)]
+pub struct TcpDirectBindings(pub HashMap<String, SocketAddr>);
 
 trait QuicStream: AsyncRead + AsyncWrite + Unpin + Send {}
 
@@ -45,7 +49,7 @@ impl QuicInboundConnection for QuicConnection {
 #[fundle::deps]
 pub struct OutboundDeps {
     /// Service names served by this node and their TCP targets.
-    tcp_direct_targets: TcpDirectTargets,
+    tcp_direct_bindings: TcpDirectBindings,
     /// QUIC publisher used by outbound handlers to subscribe to incoming sessions.
     quic_publisher: QuicPublisher,
 }
@@ -69,16 +73,17 @@ impl OutboundBundle {
 async fn init_tcp_direct(
     deps: OutboundDeps,
 ) -> Result<Option<TcpDirectHandle>, ErrorReport<Error>> {
-    if deps.tcp_direct_targets.0.is_empty() {
+    if deps.tcp_direct_bindings.0.is_empty() {
         return Ok(None);
     }
 
-    let tcp_direct = TcpDirectOutbound::new(deps.tcp_direct_targets.0.clone(), deps.quic_publisher)
-        .await
-        .change_context(Error("Failed to create TCP direct outbound".into()))?
-        .spawn();
+    let tcp_direct =
+        TcpDirectOutbound::new(deps.tcp_direct_bindings.0.clone(), deps.quic_publisher)
+            .await
+            .change_context(Error("Failed to create TCP direct outbound".into()))?
+            .spawn();
 
-    for (service_name, addr) in &deps.tcp_direct_targets.0 {
+    for (service_name, addr) in &deps.tcp_direct_bindings.0 {
         log::info!("TCP direct outbound serving '{service_name}' on '{addr}'");
     }
     Ok(Some(tcp_direct))
