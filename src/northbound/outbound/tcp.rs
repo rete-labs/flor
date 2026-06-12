@@ -36,16 +36,16 @@ impl_lifecycle_handle!(TcpDirectHandle);
 /// forwards every accepted bidirectional stream to the matching TCP address.
 pub struct TcpDirectOutbound {
     acceptor: QuicAcceptor,
-    targets: Arc<HashMap<String, SocketAddr>>,
+    bindings: Arc<HashMap<String, SocketAddr>>,
 }
 
 impl TcpDirectOutbound {
     /// Publish the configured service names and return a component ready to start.
     pub async fn new(
-        targets: HashMap<String, SocketAddr>,
+        bindings: HashMap<String, SocketAddr>,
         publisher: QuicPublisher,
     ) -> Result<Self, Report<Error>> {
-        let served = targets.keys().cloned().collect::<Vec<_>>();
+        let served = bindings.keys().cloned().collect::<Vec<_>>();
         let acceptor = publisher
             .publish(served)
             .await
@@ -53,7 +53,7 @@ impl TcpDirectOutbound {
 
         Ok(Self {
             acceptor,
-            targets: Arc::new(targets),
+            bindings: Arc::new(bindings),
         })
     }
 
@@ -69,9 +69,9 @@ impl TcpDirectOutbound {
             tokio::select! {
                 accepted = self.acceptor.accept() => match accepted {
                     Some((service_name, conn)) => {
-                        let targets = self.targets.clone();
+                        let bindings = self.bindings.clone();
                         tasks.spawn(async move {
-                            handle_connection(service_name, conn, targets).await;
+                            handle_connection(service_name, conn, bindings).await;
                         });
                     }
                     None => {
@@ -94,9 +94,9 @@ impl TcpDirectOutbound {
 async fn handle_connection(
     service_name: String,
     conn: impl QuicInboundConnection + 'static,
-    targets: Arc<HashMap<String, SocketAddr>>,
+    bindings: Arc<HashMap<String, SocketAddr>>,
 ) {
-    let Some(target_addr) = targets.get(&service_name).copied() else {
+    let Some(target_addr) = bindings.get(&service_name).copied() else {
         log::debug!(target: LOG_TARGET, "No TCP target configured for '{service_name}'");
         return;
     };

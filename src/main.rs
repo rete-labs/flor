@@ -7,16 +7,16 @@ use clap::{Args as ClapArgs, Parser, Subcommand};
 use error_stack::{Report, ResultExt};
 
 use flor::{
-    AddrMap, AppConfigBundle, EndpointAddr, Socks5Targets, TcpDirectTargets,
+    AppConfigBundle,
     cli::{print_error, write_secret},
     core::{
         identity::{Kind, TrustDomain, build_id, keygen_csr},
-        transport::{QuicConnector, QuicPublisher, TransportBundle},
+        transport::{AddrMap, EndpointAddr, QuicConnector, QuicPublisher, TransportBundle},
     },
     logging,
     northbound::{
-        inbound::{Error as InboundError, InboundBundle},
-        outbound::{Error as OutboundError, OutboundBundle},
+        inbound::{Error as InboundError, InboundBundle, Socks5Bindings},
+        outbound::{Error as OutboundError, OutboundBundle, TcpDirectBindings},
     },
     utils::report::ErrorReport,
 };
@@ -81,7 +81,7 @@ struct KeygenArgs {
 
 #[fundle::bundle]
 struct AppBundle {
-    #[forward(EndpointAddr, AddrMap, Socks5Targets, TcpDirectTargets)]
+    #[forward(EndpointAddr, AddrMap, Socks5Bindings, TcpDirectBindings)]
     pub config: AppConfigBundle,
     #[forward(QuicConnector, QuicPublisher)]
     pub transport: TransportBundle,
@@ -172,11 +172,11 @@ async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
     let (quic_addr, socks5_inbounds, tcp_outbounds) = service_map
         .get(node_name.as_str())
         .ok_or_else(|| Report::new(Error("Node not found in predefined service map".into())))?;
-    let socks5_targets = socks5_inbounds
+    let socks5_bindings = socks5_inbounds
         .iter()
         .map(|(workload, addr)| (workload.to_string(), *addr))
         .collect::<HashMap<_, _>>();
-    let tcp_direct_targets = tcp_outbounds.iter().cloned().collect::<HashMap<_, _>>();
+    let tcp_direct_bindings = tcp_outbounds.iter().cloned().collect::<HashMap<_, _>>();
 
     log::info!(
         "Node '{}' bound to {}. SOCKS5 workloads: {}. TCP services: {}.",
@@ -214,8 +214,8 @@ async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
         .config(|_| AppConfigBundle {
             endpoint_addr: EndpointAddr(*quic_addr),
             addr_map: AddrMap(addr_map.clone()),
-            socks5_targets: Socks5Targets(socks5_targets.clone()),
-            tcp_direct_targets: TcpDirectTargets(tcp_direct_targets.clone()),
+            socks5_bindings: Socks5Bindings(socks5_bindings.clone()),
+            tcp_direct_bindings: TcpDirectBindings(tcp_direct_bindings.clone()),
         })
         .transport_try(|b| TransportBundle::try_new(b))
         .change_context_lazy(bundle_err)?

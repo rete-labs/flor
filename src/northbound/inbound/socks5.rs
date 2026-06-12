@@ -107,10 +107,10 @@ impl Socks5Inbound {
     /// Bind client-specific listeners and return a component ready to be started via
     /// [`spawn`](Self::spawn).
     pub async fn new(
-        targets: HashMap<String, SocketAddr>,
+        bindings: HashMap<String, SocketAddr>,
         connector: QuicConnector,
     ) -> Result<Self, Report<Error>> {
-        let listeners = bind_listeners(targets).await?;
+        let listeners = bind_listeners(bindings).await?;
         Ok(Self {
             listeners,
             backend: Arc::new(connector),
@@ -136,10 +136,10 @@ impl Socks5Inbound {
 }
 
 async fn bind_listeners(
-    targets: HashMap<String, SocketAddr>,
+    bindings: HashMap<String, SocketAddr>,
 ) -> Result<HashMap<String, TcpListener>, Report<Error>> {
-    let mut listeners = HashMap::with_capacity(targets.len());
-    for (service_name, listen_addr) in targets {
+    let mut listeners = HashMap::with_capacity(bindings.len());
+    for (service_name, listen_addr) in bindings {
         let listener = TcpListener::bind(listen_addr)
             .await
             .change_context_lazy(|| {
