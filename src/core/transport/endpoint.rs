@@ -26,6 +26,8 @@ pub use actor::{QuicAcceptor, QuicConnector, QuicHandle, QuicPublisher};
 pub mod connection;
 use connection::{Close, Inspect, QuicConnection};
 
+mod verifier;
+
 /// Validates whether an incoming connection's requested service name is currently served.
 ///
 /// Implemented by the actor layer and injected into [`QuicEndpoint`] at spawn time, keeping
