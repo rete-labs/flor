@@ -1,6 +1,11 @@
 # cargo output dir
 /target
 
+# dev mTLS material minted by scripts/dev-bootstrap.sh (CA key + per-principal
+# SVIDs). Already covered by the `.*` rule below; listed explicitly because it
+# holds private keys and must never be committed.
+/.flor-dev/
+
 # all dotfiles except some
 .*
 !.cargo
