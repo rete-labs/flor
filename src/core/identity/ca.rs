@@ -1,9 +1,9 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-//! Cluster root CA: keypair + self-signed cert + signing primitives.
+//! Rete root CA: keypair + self-signed cert + signing primitives.
 //!
-//! One CA per cluster (C0/C1, no intermediate). The CA mints all six principal
+//! One CA per rete (C0/C1, no intermediate). The CA mints all six principal
 //! kinds; the difference between a TLS-capable leaf (`User`/`Service`/`Node`/
 //! `Vertex`) and a signing-only leaf (`ControlPlane`/`ManagementPlane`) is the
 //! X.509 extension policy applied by [`Ca::sign_csr`] — see ADR-0005.
@@ -28,7 +28,7 @@ use time::OffsetDateTime;
 
 use crate::core::identity::{Error, Kind, SpiffeId, TrustDomain};
 
-/// A cluster root CA: holds the signing key and self-signed certificate.
+/// A rete root CA: holds the signing key and self-signed certificate.
 pub struct Ca {
     issuer: Issuer<'static, KeyPair>,
     cert_der: CertificateDer<'static>,
@@ -106,7 +106,7 @@ impl Ca {
         })
     }
 
-    /// The cluster trust domain this CA signs for.
+    /// The rete trust domain this CA signs for.
     pub fn trust_domain(&self) -> &TrustDomain {
         &self.trust_domain
     }

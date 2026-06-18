@@ -65,7 +65,7 @@ struct KeygenArgs {
     /// Principal name (last path segment of the SPIFFE ID).
     #[arg(long)]
     name: String,
-    /// Cluster trust domain (e.g. `demo.flor`).
+    /// Rete trust domain.
     #[arg(long)]
     trust_domain: String,
     /// Node name for node-scoped principals.
@@ -161,7 +161,7 @@ async fn demo_main(node_name: String) -> Result<(), Report<Error>> {
                 "127.0.0.1:31440".parse::<SocketAddr>().unwrap(), // QUIC address
                 vec![],                                           // SOCKS5 workloads (none on Beta)
                 vec![(
-                    "tcp-echo.beta.demo-cluster.rete".to_string(),
+                    "tcp-echo.beta.my-demo.rete".to_string(),
                     "127.0.0.1:32450".parse::<SocketAddr>().unwrap(),
                 )], // TCP services
             ),

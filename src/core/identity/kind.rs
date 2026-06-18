@@ -5,7 +5,7 @@
 //!
 //! SPIFFE paths in Florete follow `/<kind>[/<node>]/<name>`:
 //!
-//! - Cluster-scoped: `/user/alice`, `/service/db`, `/node/alpha`,
+//! - Rete-scoped: `/user/alice`, `/service/db`, `/node/alpha`,
 //!   `/control-plane/primary`, `/management-plane/primary`.
 //! - Node-scoped (only for `service` and `vertex`): `/service/alpha/db`,
 //!   `/vertex/alpha/flor`.
@@ -26,7 +26,7 @@ use crate::core::identity::{Error, SpiffeId};
 /// `Kind` is the *cert-shape* axis: it determines the X.509 extension policy
 /// applied at signing and how the URI is parsed. It is intentionally
 /// orthogonal to [`Scope`], which is the *deployment-placement* axis (where a
-/// principal lives in the cluster). Most identity-layer code (cert issuance,
+/// principal lives in the rete). Most identity-layer code (cert issuance,
 /// audit, ACL evaluation) dispatches on `Kind` and doesn't care about
 /// scope; deployment-layer code is where placement matters.
 /// Resist the urge to merge these axes — see ADR-0005.
@@ -35,10 +35,10 @@ pub enum Kind {
     /// A human user.
     User,
     /// A service — one or more workloads that expose endpoints.
-    /// Cluster-scoped services may be backed by multiple workloads (load
+    /// Rete-scoped services may be backed by multiple workloads (load
     /// balanced across hosts); node-scoped services are bound to one host.
     Service,
-    /// A physical or virtual host enrolled into the cluster.
+    /// A physical or virtual host enrolled into the rete.
     Node,
     /// A vertex — a special kind of service that provides Florete IPC.
     Vertex,
@@ -123,12 +123,12 @@ impl FromStr for Kind {
     }
 }
 
-/// Where a principal lives in the cluster — the *deployment-placement* axis,
+/// Where a principal lives in the rete — the *deployment-placement* axis,
 /// orthogonal to [`Kind`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Scope {
-    /// Cluster-wide principal (not bound to a specific node).
-    Cluster,
+    /// Rete-wide principal (not bound to a specific node).
+    Rete,
     /// Node-scoped principal; carries the node's name.
     Node(String),
 }
@@ -147,9 +147,9 @@ pub fn kind_of(id: &SpiffeId) -> Result<Kind, Report<Error>> {
 /// Project a SPIFFE ID onto its [`Scope`].
 ///
 /// Rules:
-/// - `User`, `Node`, `ControlPlane`, `ManagementPlane` → cluster-scoped only
+/// - `User`, `Node`, `ControlPlane`, `ManagementPlane` → rete-scoped only
 ///   (path `/<kind>/<name>`).
-/// - `Service`, `Vertex` → cluster-scoped (`/<kind>/<name>`) **or** node-scoped
+/// - `Service`, `Vertex` → rete-scoped (`/<kind>/<name>`) **or** node-scoped
 ///   (`/<kind>/<node>/<name>`).
 ///
 /// Any other shape is an error.
@@ -158,11 +158,11 @@ pub fn scope_of(id: &SpiffeId) -> Result<Scope, Report<Error>> {
     let trailing: Vec<&str> = path_segments(id).skip(1).collect();
     let node_scopable = kind.into_node_scopable().is_some();
     match (trailing.as_slice(), node_scopable) {
-        ([_name], _) => Ok(Scope::Cluster),
+        ([_name], _) => Ok(Scope::Rete),
         ([node, _name], true) => Ok(Scope::Node((*node).to_string())),
         _ => {
             let expected = if node_scopable {
-                "1 (cluster) or 2 (node-scoped) trailing segments"
+                "1 (rete) or 2 (node-scoped) trailing segments"
             } else {
                 "1 trailing segment"
             };
@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_of_cluster_kinds() {
+    fn scope_of_rete_kinds() {
         for path in [
             "spiffe://demo.flor/user/alice",
             "spiffe://demo.flor/node/alpha",
@@ -275,7 +275,7 @@ mod tests {
             "spiffe://demo.flor/management-plane/primary",
             "spiffe://demo.flor/service/db",
         ] {
-            assert_eq!(scope_of(&id(path)).unwrap(), Scope::Cluster, "{path}");
+            assert_eq!(scope_of(&id(path)).unwrap(), Scope::Rete, "{path}");
         }
     }
 
@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_of_rejects_extra_segments_for_cluster_kinds() {
+    fn scope_of_rejects_extra_segments_for_rete_kinds() {
         let err = scope_of(&id("spiffe://demo.flor/user/alice/extra")).unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("wrong shape for user"), "{msg}");
