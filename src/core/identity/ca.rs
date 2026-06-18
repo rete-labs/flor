@@ -258,6 +258,10 @@ fn single_uri_san<'a>(
 }
 
 fn apply_kind_policy(params: &mut CertificateParams, kind: Kind) {
+    // Every leaf is a non-CA. Emit an explicit `CA:FALSE` BasicConstraints:
+    // the SPIFFE X.509-SVID profile requires the extension to be present on a
+    // leaf SVID (the `spiffe` crate's SVID validator rejects a leaf without it).
+    params.is_ca = IsCa::ExplicitNoCa;
     match kind {
         Kind::User | Kind::Service | Kind::Node | Kind::Vertex => {
             // TLS-capable leaf. `digitalSignature` is required for the TLS
@@ -347,6 +351,39 @@ mod tests {
                 .find(|e| e.oid == x509_parser::oid_registry::OID_X509_EXT_KEY_USAGE)
                 .expect("leaf has keyUsage");
             assert!(ku.critical, "{kind:?} keyUsage must be critical");
+        }
+    }
+
+    #[test]
+    fn every_leaf_carries_explicit_ca_false_basic_constraints() {
+        // SPIFFE X.509-SVID requires basicConstraints present with CA:FALSE on
+        // the leaf; the `spiffe` crate's SVID validator rejects a leaf without
+        // it. Lock the CA policy that emits it for all six kinds.
+        let ca = Ca::init(&td(), day()).unwrap();
+        for (kind, uri) in [
+            (Kind::User, "spiffe://demo.flor/user/alice"),
+            (Kind::Service, "spiffe://demo.flor/service/db"),
+            (Kind::Node, "spiffe://demo.flor/node/alpha"),
+            (Kind::Vertex, "spiffe://demo.flor/vertex/alpha/flor"),
+            (
+                Kind::ControlPlane,
+                "spiffe://demo.flor/control-plane/primary",
+            ),
+            (
+                Kind::ManagementPlane,
+                "spiffe://demo.flor/management-plane/primary",
+            ),
+        ] {
+            let id = SpiffeId::new(uri).unwrap();
+            let (_k, csr) = keygen_csr(&id).unwrap();
+            let leaf = ca.sign_csr(csr.as_bytes(), &id, kind, day()).unwrap();
+            let leaf_der = pem_to_der(&leaf);
+            let (_, parsed) = x509_parser::parse_x509_certificate(&leaf_der).unwrap();
+            let bc = parsed
+                .basic_constraints()
+                .unwrap()
+                .expect("leaf has basicConstraints");
+            assert!(!bc.value.ca, "{kind:?} leaf must be CA:FALSE");
         }
     }
 
