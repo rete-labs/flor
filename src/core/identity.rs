@@ -19,9 +19,9 @@ pub use ca::Ca;
 pub use csr::keygen_csr;
 pub use dialable::Dialable;
 pub use kind::{Kind, NodeScopableKind, Scope, kind_of, scope_of};
-pub use spiffe::{SpiffeId, TrustDomain};
+pub use spiffe::{SpiffeId, TrustDomain, X509Bundle, X509Svid};
 
-use error_stack::{Report, ResultExt};
+use error_stack::{Report, ResultExt, bail};
 
 /// Build a rete-scoped SPIFFE ID: `spiffe://<td>/<kind>/<name>`.
 ///
@@ -77,6 +77,65 @@ pub fn build_id(
             build_id_on_node(trust_domain, nsk, node, name)
         }
     }
+}
+
+/// Load an [`X509Svid`] from PEM material: a leaf (optionally with intermediate)
+/// certificate chain and its PKCS#8 private key.
+///
+/// `cert_pem` may hold one or more concatenated `CERTIFICATE` blocks, leaf
+/// first (the SPIFFE X.509-SVID chain order); `key_pem` must hold a single
+/// `PRIVATE KEY` block. Both are converted PEM→DER and handed to
+/// [`X509Svid::parse_from_der`], which validates the leaf SAN and chain.
+pub fn load_svid_from_pem(cert_pem: &[u8], key_pem: &[u8]) -> Result<X509Svid, Report<Error>> {
+    let chain_der = pem_blocks_to_der(cert_pem, "CERTIFICATE")?;
+    let key_der = single_pem_block_to_der(key_pem, "PRIVATE KEY")?;
+    X509Svid::parse_from_der(&chain_der, &key_der)
+        .change_context(Error::new("Failed to parse X509 SVID from PEM material"))
+}
+
+/// Load an [`X509Bundle`] (trust anchors) for `trust_domain` from one or more
+/// concatenated `CERTIFICATE` PEM blocks (the rete CA cert).
+pub fn load_bundle_from_pem(
+    trust_domain: &TrustDomain,
+    ca_cert_pem: &[u8],
+) -> Result<X509Bundle, Report<Error>> {
+    let der = pem_blocks_to_der(ca_cert_pem, "CERTIFICATE")?;
+    X509Bundle::parse_from_der(trust_domain.clone(), &der).change_context(Error::new(
+        "Failed to parse X509 trust bundle from PEM material",
+    ))
+}
+
+/// Decode every PEM block tagged `tag` in `pem` and concatenate their DER
+/// bodies (the form both `X509Svid` and `X509Bundle` consume). Errors if no
+/// block of that tag is present.
+fn pem_blocks_to_der(pem: &[u8], tag: &str) -> Result<Vec<u8>, Report<Error>> {
+    let blocks =
+        ::pem::parse_many(pem).change_context(Error::new("Failed to parse PEM material"))?;
+    let mut der = Vec::new();
+    for block in blocks.into_iter().filter(|b| b.tag() == tag) {
+        der.extend_from_slice(block.contents());
+    }
+    if der.is_empty() {
+        bail!(Error::new(format!("PEM material has no {tag} block")));
+    }
+    Ok(der)
+}
+
+/// Decode exactly one PEM block tagged `tag` into its DER body. Errors if zero
+/// or more than one such block is present.
+fn single_pem_block_to_der(pem: &[u8], tag: &str) -> Result<Vec<u8>, Report<Error>> {
+    let blocks =
+        ::pem::parse_many(pem).change_context(Error::new("Failed to parse PEM material"))?;
+    let mut matching = blocks.into_iter().filter(|b| b.tag() == tag);
+    let block = matching
+        .next()
+        .ok_or_else(|| Report::new(Error::new(format!("PEM material has no {tag} block"))))?;
+    if matching.next().is_some() {
+        bail!(Error::new(format!(
+            "PEM material has more than one {tag} block"
+        )));
+    }
+    Ok(block.into_contents())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -184,6 +243,59 @@ mod tests {
                 "{kind:?}: {err:?}",
             );
         }
+    }
+
+    fn day() -> std::time::Duration {
+        std::time::Duration::from_secs(24 * 3600)
+    }
+
+    /// Mint a CA + leaf for `uri`/`kind` and return `(ca_cert_pem, leaf_pem, key_pem)`.
+    fn mint(uri: &str, kind: Kind) -> (String, String, String) {
+        let ca = Ca::init(&td(), day()).unwrap();
+        let id = SpiffeId::new(uri).unwrap();
+        let (key, csr) = keygen_csr(&id).unwrap();
+        let leaf = ca.sign_csr(csr.as_bytes(), &id, kind, day()).unwrap();
+        (ca.cert_pem().to_string(), leaf, key.serialize_pem())
+    }
+
+    #[test]
+    fn load_svid_from_pem_recovers_spiffe_id() {
+        let (_ca, leaf, key) = mint("spiffe://demo.flor/service/beta/tcp-echo", Kind::Service);
+        let svid = load_svid_from_pem(leaf.as_bytes(), key.as_bytes()).unwrap();
+        assert_eq!(
+            svid.spiffe_id().to_string(),
+            "spiffe://demo.flor/service/beta/tcp-echo"
+        );
+    }
+
+    #[test]
+    fn load_svid_from_pem_rejects_missing_key_block() {
+        let (_ca, leaf, _key) = mint("spiffe://demo.flor/user/alice", Kind::User);
+        // Feed the leaf cert where a key is expected — no PRIVATE KEY block.
+        let err = load_svid_from_pem(leaf.as_bytes(), leaf.as_bytes()).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("no PRIVATE KEY block"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn load_bundle_from_pem_holds_the_ca_authority() {
+        let (ca_cert, _leaf, _key) = mint("spiffe://demo.flor/user/alice", Kind::User);
+        let bundle = load_bundle_from_pem(&td(), ca_cert.as_bytes()).unwrap();
+        assert_eq!(bundle.authorities().len(), 1);
+        assert_eq!(bundle.trust_domain(), &td());
+    }
+
+    #[test]
+    fn load_bundle_from_pem_rejects_non_cert_pem() {
+        let (_ca, _leaf, key) = mint("spiffe://demo.flor/user/alice", Kind::User);
+        // A PRIVATE KEY block carries no CERTIFICATE — rejected.
+        let err = load_bundle_from_pem(&td(), key.as_bytes()).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("no CERTIFICATE block"),
+            "{err:?}"
+        );
     }
 
     #[test]
