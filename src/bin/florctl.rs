@@ -1,7 +1,7 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-//! `florctl` — operator-only cluster-authoring CLI.
+//! `florctl` — operator-only rete-authoring CLI.
 //!
 //! The CA private key is only ever touched by this binary; it never ships to a node.
 
@@ -21,7 +21,7 @@ use flor::{
 struct Error(String);
 
 #[derive(Parser, Debug)]
-#[command(name = "florctl", about = "Florete operator CLI (cluster authoring)")]
+#[command(name = "florctl", about = "Florete operator CLI (rete authoring)")]
 struct Cli {
     /// Show the full error-stack chain on failure (default: compact `: `-joined chain).
     #[arg(short, long, global = true)]
@@ -42,7 +42,7 @@ enum Cmd {
 
 #[derive(Subcommand, Debug)]
 enum CaAction {
-    /// Generate a fresh cluster CA keypair and self-sign its root certificate.
+    /// Generate a fresh rete CA keypair and self-sign its root certificate.
     Init(CaInitArgs),
     /// Sign a CSR, applying the X.509 extension policy for the principal kind.
     ///
@@ -53,7 +53,7 @@ enum CaAction {
 
 #[derive(Args, Debug)]
 struct CaInitArgs {
-    /// Cluster trust domain (e.g. `demo.flor`). Doubles as the cluster name.
+    /// Rete trust domain. Doubles as the rete name.
     #[arg(long)]
     trust_domain: String,
     /// CA validity in days.
@@ -84,10 +84,10 @@ struct CaSignArgs {
     /// Leaf certificate validity in days.
     #[arg(long, default_value_t = 90)]
     validity_days: u32,
-    /// Path to the cluster CA certificate.
+    /// Path to the rete CA certificate.
     #[arg(long)]
     ca_cert: PathBuf,
-    /// Path to the cluster CA private key.
+    /// Path to the rete CA private key.
     #[arg(long)]
     ca_key: PathBuf,
     /// Where to write the signed leaf certificate PEM.
