@@ -23,9 +23,6 @@ use std::{
 };
 
 #[cfg(test)]
-use super::connection::Inspect;
-
-#[cfg(test)]
 mock! {
     pub Endpoint {
         pub fn new_with_abstract_socket(
@@ -35,14 +32,13 @@ mock! {
             runtime: Arc<dyn Runtime>,
         ) -> io::Result<Self>;
 
-        pub fn set_default_client_config(&mut self, config: ClientConfig);
-
         // Simplified: we return Option<MockIncoming> directly; caller awaits the inner future
         pub fn accept(&self) -> Pin<Box<dyn Future<Output = Option<MockIncoming>> + Send>>;
 
-        // We do not test `connect` now as it is trivial
-        pub fn connect(
+        // We do not test `connect_with` now as it is trivial
+        pub fn connect_with(
             &self,
+            config: ClientConfig,
             addr: SocketAddr,
             server_name: &str
         ) -> Result<quinn::Connecting, quinn::ConnectError>;
@@ -106,19 +102,5 @@ mock! {
 
     impl Debug for Runtime {
         fn fmt<'a>(&self, fmt: &mut std::fmt::Formatter<'a>) -> Result<(), std::fmt::Error>;
-    }
-}
-
-#[cfg(test)]
-mock! {
-    pub InspectConn {}
-
-    impl Inspect for InspectConn {
-        fn handshake_data(
-            &self,
-        ) -> Result<
-            quinn::crypto::rustls::HandshakeData,
-            error_stack::Report<crate::core::transport::Error>,
-        >;
     }
 }

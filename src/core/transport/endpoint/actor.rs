@@ -1,7 +1,7 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-use std::{collections::HashMap, sync::RwLock};
+use std::sync::Arc;
 
 use error_stack::{IntoReport, Report, ResultExt};
 use tokio::{
@@ -10,44 +10,33 @@ use tokio::{
 };
 
 use crate::{
-    core::transport::{Error, resolver::Resolver},
+    core::{
+        identity::{Dialable, SpiffeId, X509Bundle, X509Svid},
+        transport::{Error, resolver::Resolver},
+    },
     impl_lifecycle_handle,
     utils::lifecycle::LifecycleHandle,
 };
 
-use super::{QuicEndpoint, ServiceValidator, connection::QuicConnection};
-
-/// Shared registry mapping service names to their subscriber channels.
-///
-/// Written by the actor on publish/cleanup; read by [`QuicEndpoint`] on every accepted
-/// connection to decide whether the requested SNI service is served.
-struct SharedServiceRegistry(RwLock<HashMap<String, mpsc::Sender<(String, QuicConnection)>>>);
-
-impl SharedServiceRegistry {
-    fn new() -> Arc<Self> {
-        Arc::new(Self(RwLock::new(HashMap::new())))
-    }
-}
-
-impl ServiceValidator for SharedServiceRegistry {
-    fn is_served(&self, service: &str) -> bool {
-        self.0.read().unwrap().contains_key(service)
-    }
-}
-
-use std::sync::Arc;
+use super::{
+    AcceptOutcome, QuicEndpoint, SvidTls,
+    connection::QuicConnection,
+    registry::{Publication, PublishedServices},
+    sni_for,
+};
 
 const CHANNEL_CAPACITY: usize = 32;
 
-type PublishResult = Result<mpsc::Receiver<(String, QuicConnection)>, Report<Error>>;
+type PublishResult = Result<mpsc::Receiver<(SpiffeId, QuicConnection)>, Report<Error>>;
 
 pub(crate) struct ConnectMsg {
-    service: String,
+    caller: X509Svid,
+    target: Dialable,
     reply: oneshot::Sender<Result<QuicConnection, Report<Error>>>,
 }
 
 pub(crate) struct PublishMsg {
-    served: Vec<String>,
+    svids: Vec<X509Svid>,
     reply: oneshot::Sender<PublishResult>,
 }
 
@@ -58,14 +47,19 @@ pub(crate) struct PublishMsg {
 pub struct QuicConnector(mpsc::Sender<ConnectMsg>);
 
 impl QuicConnector {
-    /// Open a connection to the named service.
+    /// Open a connection to `target`, authenticating as `caller`.
     ///
     /// Fails if the actor has shut down or if the underlying QUIC connect fails.
-    pub async fn connect(&self, service: &str) -> Result<QuicConnection, Report<Error>> {
+    pub async fn connect(
+        &self,
+        caller: &X509Svid,
+        target: &Dialable,
+    ) -> Result<QuicConnection, Report<Error>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.0
             .send(ConnectMsg {
-                service: service.to_string(),
+                caller: caller.clone(),
+                target: target.clone(),
                 reply: reply_tx,
             })
             .await
@@ -84,20 +78,20 @@ impl QuicConnector {
 pub struct QuicPublisher(mpsc::Sender<PublishMsg>);
 
 impl QuicPublisher {
-    /// Subscribe to incoming connections for the given service names.
+    /// Publish a set of service SVIDs and subscribe to their incoming connections.
     ///
-    /// Returns a [`QuicAcceptor`] that will receive every incoming connection whose SNI matches
-    /// one of the requested `served` names.
+    /// Returns a [`QuicAcceptor`] that receives every accepted connection dialed at
+    /// any of the published identities, each tagged with the target [`SpiffeId`].
     ///
     /// # Errors
     ///
-    /// Returns an error if any service in `served` is already claimed by another subscriber,
-    /// or if the underlying actor has shut down.
-    pub async fn publish(&self, served: Vec<String>) -> Result<QuicAcceptor, Report<Error>> {
+    /// Returns an error if any SVID is not dialable, if its routing label is
+    /// already claimed by another subscriber, or if the actor has shut down.
+    pub async fn publish(&self, svids: Vec<X509Svid>) -> Result<QuicAcceptor, Report<Error>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.0
             .send(PublishMsg {
-                served,
+                svids,
                 reply: reply_tx,
             })
             .await
@@ -109,23 +103,25 @@ impl QuicPublisher {
     }
 }
 
-/// Handle for receiving incoming QUIC connections for subscribed services.
+/// Handle for receiving incoming QUIC connections for published services.
 ///
 /// Obtained from [`QuicPublisher::publish`].
-pub struct QuicAcceptor(mpsc::Receiver<(String, QuicConnection)>);
+pub struct QuicAcceptor(mpsc::Receiver<(SpiffeId, QuicConnection)>);
 
 impl QuicAcceptor {
-    /// Wait for the next accepted connection.
+    /// Wait for the next accepted connection, tagged with the **target** identity
+    /// it was dialed against (which of the published services). The authenticated
+    /// **peer** identity is available on the connection via `peer_id()`.
     ///
     /// Returns `None` when the actor has shut down.
-    pub async fn accept(&mut self) -> Option<(String, QuicConnection)> {
+    pub async fn accept(&mut self) -> Option<(SpiffeId, QuicConnection)> {
         self.0.recv().await
     }
 }
 
 pub(crate) struct QuicEndpointActor {
     endpoint: QuicEndpoint,
-    registry: Arc<SharedServiceRegistry>,
+    registry: Arc<PublishedServices>,
 }
 
 impl Drop for QuicEndpointActor {
@@ -138,19 +134,16 @@ impl QuicEndpointActor {
     pub(crate) fn spawn_new(
         resolver: Arc<dyn Resolver>,
         socket: std::net::UdpSocket,
+        trust_bundle: Arc<X509Bundle>,
     ) -> Result<(QuicConnector, QuicPublisher, QuicHandle), Report<Error>> {
-        let registry = SharedServiceRegistry::new();
-        let endpoint = QuicEndpoint::new(
-            resolver,
-            socket,
-            registry.clone() as Arc<dyn ServiceValidator>,
-        )?;
+        let registry = PublishedServices::new();
+        let endpoint = QuicEndpoint::new(resolver, socket, registry.clone(), trust_bundle)?;
         Ok(Self::spawn(endpoint, registry))
     }
 
     fn spawn(
         endpoint: QuicEndpoint,
-        registry: Arc<SharedServiceRegistry>,
+        registry: Arc<PublishedServices>,
     ) -> (QuicConnector, QuicPublisher, QuicHandle) {
         let (connect_tx, connect_rx) = mpsc::channel(CHANNEL_CAPACITY);
         let (publish_tx, publish_rx) = mpsc::channel(CHANNEL_CAPACITY);
@@ -166,64 +159,57 @@ impl QuicEndpointActor {
     fn handle_connect(&self, msg: ConnectMsg, connect_tasks: &mut JoinSet<()>) {
         let endpoint = self.endpoint.clone();
         connect_tasks.spawn(async move {
-            let result = endpoint.connect(&msg.service).await;
+            let result = endpoint.connect(&msg.caller, &msg.target).await;
             let _ = msg.reply.send(result);
         });
     }
 
-    fn cleanup_stale(&mut self) {
-        self.registry
-            .0
-            .write()
-            .unwrap()
-            .retain(|_, tx| !tx.is_closed());
-    }
-
     fn handle_publish(&mut self, msg: PublishMsg) {
-        self.cleanup_stale();
-
-        let mut locked_map = self.registry.0.write().unwrap();
-
-        let conflicting: Vec<String> = msg
-            .served
-            .iter()
-            .filter(|s| locked_map.contains_key(s.as_str()))
-            .cloned()
-            .collect();
-
-        if !conflicting.is_empty() {
-            let _ = msg.reply.send(Err(Error(format!(
-                "Failed to publish. Services already handled by another subscriber: {}",
-                conflicting.join(", ")
-            ))
-            .into_report()));
-            return;
-        }
-
-        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        for service in &msg.served {
-            locked_map.insert(service.clone(), tx.clone());
-        }
-        let _ = msg.reply.send(Ok(rx));
-    }
-
-    async fn dispatch_connection(&mut self, service_name: String, conn: QuicConnection) {
-        let tx = self.registry.0.read().unwrap().get(&service_name).cloned();
-        match tx {
-            Some(tx) => {
-                if tx.send((service_name.clone(), conn)).await.is_err() {
-                    log::debug!(
-                        "QuicEndpointActor: subscriber for '{service_name}' dropped, cleaning up"
-                    );
-                    self.cleanup_stale();
+        // Build a `Publication` per SVID up front — derive its routing label
+        // (dialable-only) and its cert — so we bail before touching the registry
+        // on any bad input.
+        let mut publications = Vec::with_capacity(msg.svids.len());
+        for svid in &msg.svids {
+            let spiffe_id = svid.spiffe_id().clone();
+            let dialable = match Dialable::new(spiffe_id.clone()) {
+                Ok(dialable) => dialable,
+                Err(e) => {
+                    let _ = msg.reply.send(Err(e.change_context(Error(format!(
+                        "Cannot publish {spiffe_id}: not a dialable identity"
+                    )))));
+                    return;
                 }
-            }
-            None => {
-                log::warn!(
-                    "QuicEndpointActor: no subscriber for '{service_name}', dropping connection"
-                );
-            }
+            };
+            let certified_key = match svid.certified_key() {
+                Ok(key) => key,
+                Err(e) => {
+                    let _ = msg.reply.send(Err(e));
+                    return;
+                }
+            };
+            publications.push(Publication {
+                sni: sni_for(&dialable),
+                spiffe_id,
+                certified_key,
+            });
         }
+
+        let (dispatch, acceptor_rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let reply = match self.registry.publish(publications, dispatch) {
+            Ok(()) => Ok(acceptor_rx),
+            Err(conflicts) => {
+                let names = conflicts
+                    .iter()
+                    .map(SpiffeId::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(Error(format!(
+                    "Failed to publish. Services already handled by another subscriber: {names}"
+                ))
+                .into_report())
+            }
+        };
+        let _ = msg.reply.send(reply);
     }
 
     async fn run(
@@ -241,12 +227,18 @@ impl QuicEndpointActor {
                 Some(msg) = publish_rx.recv() => {
                     self.handle_publish(msg);
                 },
-                accepted = self.endpoint.accept() => match accepted {
-                    Some((service_name, conn)) => {
-                        self.dispatch_connection(service_name, conn).await;
-                    },
-                    None => {
-                        log::debug!("QuicEndpointActor: endpoint is closed, shutting down");
+                // The endpoint resolves each accepted connection's identity and
+                // dispatches it to its subscriber internally (it holds the registry).
+                outcome = self.endpoint.accept() => match outcome {
+                    Ok(AcceptOutcome::Dispatched) => {}
+                    Ok(AcceptOutcome::Closed) => {
+                        log::debug!("QuicEndpointActor: endpoint closed, shutting down");
+                        break;
+                    }
+                    Err(e) => {
+                        // The endpoint faulted (CID exhaustion / internal inconsistency).
+                        // TODO(#13): surface this to telemetry rather than only logging.
+                        log::error!("QuicEndpointActor: accept loop faulted, shutting down: {e:?}");
                         break;
                     }
                 },
@@ -269,21 +261,50 @@ impl_lifecycle_handle!(QuicHandle);
 mod test {
     use std::sync::Arc;
 
+    use std::time::Duration;
+
     use serial_test::serial;
     use tokio::sync::oneshot;
 
+    use crate::core::identity::{
+        Ca, Kind, TrustDomain, keygen_csr, load_bundle_from_pem, load_svid_from_pem,
+    };
     use crate::core::transport::{endpoint::QuicEndpoint, resolver::MockResolver};
 
     use super::super::mocks::{MockAsyncUdpSocket, MockEndpoint, MockRuntime};
     use super::*;
 
+    /// A trust bundle from a throwaway CA — the publish/drop tests never dial, so
+    /// its contents don't matter; the endpoint just needs one to construct.
+    fn make_test_trust_bundle() -> Arc<X509Bundle> {
+        let td = TrustDomain::new("demo.flor").unwrap();
+        let ca = Ca::init(&td, Duration::from_secs(3600)).unwrap();
+        Arc::new(load_bundle_from_pem(&td, ca.cert_pem().as_bytes()).unwrap())
+    }
+
+    /// Mint an SVID for `uri`/`kind` from a throwaway CA.
+    fn mint(uri: &str, kind: Kind) -> X509Svid {
+        let td = TrustDomain::new("demo.flor").unwrap();
+        let ca = Ca::init(&td, Duration::from_secs(3600)).unwrap();
+        let id = SpiffeId::new(uri).unwrap();
+        let (key, csr) = keygen_csr(&id).unwrap();
+        let leaf = ca
+            .sign_csr(csr.as_bytes(), &id, kind, Duration::from_secs(3600))
+            .unwrap();
+        load_svid_from_pem(leaf.as_bytes(), key.serialize_pem().as_bytes()).unwrap()
+    }
+
+    /// A dialable, rete-scoped service SVID `spiffe://demo.flor/service/<name>`.
+    fn svc_svid(name: &str) -> X509Svid {
+        mint(&format!("spiffe://demo.flor/service/{name}"), Kind::Service)
+    }
+
     // Creates a QuicEndpoint whose inner MockEndpoint allows close() but never accepts connections.
     // Suitable for direct actor struct tests that only exercise handle_publish.
-    fn setup_endpoint_for_publish_tests(registry: Arc<SharedServiceRegistry>) -> QuicEndpoint {
+    fn setup_endpoint_for_publish_tests(registry: Arc<PublishedServices>) -> QuicEndpoint {
         let ctx = MockEndpoint::new_with_abstract_socket_context();
         ctx.expect().returning(|_, _, _, _| {
             let mut mock = MockEndpoint::new();
-            mock.expect_set_default_client_config().return_const(());
             mock.expect_close().return_const(());
             Ok(mock)
         });
@@ -291,25 +312,23 @@ mod test {
             Arc::new(MockResolver::new()),
             Arc::new(MockRuntime::new()),
             Arc::new(MockAsyncUdpSocket::new()),
-            registry as Arc<dyn ServiceValidator>,
+            registry,
+            make_test_trust_bundle(),
         )
         .expect("test endpoint setup failed")
     }
 
     fn make_actor() -> QuicEndpointActor {
-        let registry = SharedServiceRegistry::new();
+        let registry = PublishedServices::new();
         QuicEndpointActor {
             endpoint: setup_endpoint_for_publish_tests(registry.clone()),
             registry,
         }
     }
 
-    fn do_publish(actor: &mut QuicEndpointActor, services: Vec<&str>) -> PublishResult {
+    fn publish(actor: &mut QuicEndpointActor, svids: Vec<X509Svid>) -> PublishResult {
         let (tx, mut rx) = oneshot::channel();
-        actor.handle_publish(PublishMsg {
-            served: services.into_iter().map(str::to_string).collect(),
-            reply: tx,
-        });
+        actor.handle_publish(PublishMsg { svids, reply: tx });
         rx.try_recv()
             .expect("handle_publish must send a reply synchronously")
     }
@@ -318,37 +337,9 @@ mod test {
 
     #[test]
     #[serial]
-    fn test_publish_registers_new_services() {
+    fn test_publish_returns_an_acceptor() {
         let mut actor = make_actor();
-
-        let result = do_publish(&mut actor, vec!["svc1", "svc2"]);
-
-        assert!(result.is_ok());
-        let map = actor.registry.0.read().unwrap();
-        assert!(map.contains_key("svc1"));
-        assert!(map.contains_key("svc2"));
-    }
-
-    #[test]
-    #[serial]
-    fn test_publish_single_service_shares_channel_across_names() {
-        let mut actor = make_actor();
-        let result = do_publish(&mut actor, vec!["svc1", "svc2"]);
-
-        let rx = result.expect("publish failed");
-        // Both service names map to senders on the same channel.
-        // Verify by checking that both senders are alive and reference the same logical channel.
-        {
-            let map = actor.registry.0.read().unwrap();
-            assert!(!map.get("svc1").unwrap().is_closed());
-            assert!(!map.get("svc2").unwrap().is_closed());
-        }
-        drop(rx);
-        {
-            let map = actor.registry.0.read().unwrap();
-            assert!(map.get("svc1").unwrap().is_closed());
-            assert!(map.get("svc2").unwrap().is_closed());
-        }
+        assert!(publish(&mut actor, vec![svc_svid("api")]).is_ok());
     }
 
     #[test]
@@ -356,9 +347,10 @@ mod test {
     fn test_publish_conflict_returns_error_naming_service() {
         let mut actor = make_actor();
 
-        let _sub = do_publish(&mut actor, vec!["svc1"]).expect("first publish failed");
+        // Hold the first acceptor so its registration stays live (not reaped).
+        let _sub = publish(&mut actor, vec![svc_svid("svc1")]).expect("first publish failed");
 
-        let err = do_publish(&mut actor, vec!["svc1"]).unwrap_err();
+        let err = publish(&mut actor, vec![svc_svid("svc1")]).unwrap_err();
         assert!(
             err.to_string().contains("svc1"),
             "error must name the conflicting service; got: {err}"
@@ -367,32 +359,18 @@ mod test {
 
     #[test]
     #[serial]
-    fn test_publish_partial_conflict_is_atomic() {
+    fn test_publish_rejects_non_dialable_svid() {
         let mut actor = make_actor();
 
-        let _sub = do_publish(&mut actor, vec!["svc1"]).expect("setup failed");
-
-        // svc1 conflicts, svc2 is new — the whole publish must be rejected.
-        let result = do_publish(&mut actor, vec!["svc1", "svc2"]);
-        assert!(result.is_err(), "publish with a conflict must fail");
+        // A user SVID is authenticated but not a dial target (ADR-0007).
+        let err = publish(
+            &mut actor,
+            vec![mint("spiffe://demo.flor/user/alice", Kind::User)],
+        )
+        .unwrap_err();
         assert!(
-            !actor.registry.0.read().unwrap().contains_key("svc2"),
-            "svc2 must not be partially registered when svc1 conflicts"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn test_publish_allows_reregister_after_subscriber_drops() {
-        let mut actor = make_actor();
-
-        let sub = do_publish(&mut actor, vec!["svc1"]).expect("first publish failed");
-        drop(sub); // simulate subscriber dropping its QuicAcceptor
-
-        let result = do_publish(&mut actor, vec!["svc1"]);
-        assert!(
-            result.is_ok(),
-            "should succeed after stale subscriber is cleaned up"
+            err.to_string().contains("not a dialable identity"),
+            "got: {err}"
         );
     }
 
@@ -404,7 +382,6 @@ mod test {
         let ctx = MockEndpoint::new_with_abstract_socket_context();
         ctx.expect().returning(|_, _, _, _| {
             let mut mock = MockEndpoint::new();
-            mock.expect_set_default_client_config().return_const(());
             // accept() returns None immediately → run loop exits naturally.
             mock.expect_accept().returning(|| Box::pin(async { None }));
             // close() must be called exactly once by Drop for QuicEndpointActor.
@@ -412,12 +389,13 @@ mod test {
             Ok(mock)
         });
 
-        let registry = SharedServiceRegistry::new();
+        let registry = PublishedServices::new();
         let endpoint = QuicEndpoint::new_with_abstract_socket(
             Arc::new(MockResolver::new()),
             Arc::new(MockRuntime::new()),
             Arc::new(MockAsyncUdpSocket::new()),
-            registry.clone() as Arc<dyn ServiceValidator>,
+            registry.clone(),
+            make_test_trust_bundle(),
         )
         .unwrap();
 

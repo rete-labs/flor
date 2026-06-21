@@ -1,16 +1,19 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-use std::{collections::HashMap, net::SocketAddr};
+use std::net::SocketAddr;
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
-    core::transport::{
-        QuicPublisher,
-        endpoint::connection::{Accept, QuicConnection},
+    core::{
+        identity::X509Svid,
+        transport::{
+            QuicPublisher,
+            endpoint::connection::{Accept, QuicConnection},
+        },
     },
     northbound::outbound::tcp::{TcpDirectHandle, TcpDirectOutbound},
     utils::report::ErrorReport,
@@ -22,8 +25,10 @@ pub mod tcp;
 #[error("{0}")]
 pub struct Error(String);
 
+/// TCP-direct service targets: each served service's SVID and its local TCP
+/// upstream address.
 #[derive(Debug, Clone)]
-pub struct TcpDirectBindings(pub HashMap<String, SocketAddr>);
+pub struct TcpDirectBindings(pub Vec<(X509Svid, SocketAddr)>);
 
 trait QuicStream: AsyncRead + AsyncWrite + Unpin + Send {}
 
@@ -83,8 +88,11 @@ async fn init_tcp_direct(
             .change_context(Error("Failed to create TCP direct outbound".into()))?
             .spawn();
 
-    for (service_name, addr) in &deps.tcp_direct_bindings.0 {
-        log::info!("TCP direct outbound serving '{service_name}' on '{addr}'");
+    for (svid, addr) in &deps.tcp_direct_bindings.0 {
+        log::info!(
+            "TCP direct outbound serving '{}' on '{addr}'",
+            svid.spiffe_id()
+        );
     }
     Ok(Some(tcp_direct))
 }

@@ -3,18 +3,19 @@
 
 use std::sync::Arc;
 
-use error_stack::{Report, ResultExt};
+use error_stack::{Report, ResultExt, bail};
 use mockall_double::double;
 use quinn::{
     ClientConfig, ServerConfig, VarInt,
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
 };
 use rustls::{
-    pki_types::{CertificateDer, PrivatePkcs8KeyDer},
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    sign::CertifiedKey,
     version::TLS13,
 };
 
-use super::{Error, insecure_server_verifier::InsecureServerVerifier, resolver::Resolver};
+use super::{Error, resolver::Resolver};
 
 mod mocks;
 #[double]
@@ -24,48 +25,103 @@ pub mod actor;
 pub use actor::{QuicAcceptor, QuicConnector, QuicHandle, QuicPublisher};
 
 pub mod connection;
-use connection::{Close, Inspect, QuicConnection};
+use connection::{AcceptedConnection, QuicConnection};
+
+mod registry;
 
 mod verifier;
+use verifier::{
+    ServerCertRegistry, SpiffeClientCertVerifier, SpiffeResolvesServerCert,
+    SpiffeServerCertVerifier,
+};
 
-/// Validates whether an incoming connection's requested service name is currently served.
-///
-/// Implemented by the actor layer and injected into [`QuicEndpoint`] at spawn time, keeping
-/// the endpoint decoupled from subscriber-management details.
-trait ServiceValidator: Send + Sync {
-    fn is_served(&self, service: &str) -> bool;
-}
+use crate::core::identity::{Dialable, X509Bundle, X509Svid};
 
 /// QUIC-based Florete Endpoint.
 #[derive(Clone)]
 struct QuicEndpoint {
     endpoint: Endpoint,
     resolver: Arc<dyn Resolver>,
-    validator: Arc<dyn ServiceValidator>,
+    /// Published-cert registry: which SVID to present for an SNI, and where to
+    /// route the accepted connection. Shared with the actor that mutates it.
+    registry: Arc<registry::PublishedServices>,
+    /// Rete trust anchors both mTLS verifiers validate peers against.
+    trust_bundle: Arc<X509Bundle>,
 }
 
 // Close was caused by the endpoint, either normally or by internal error
 const ENDPOINT_CLOSE_CODE: u32 = 0;
-// Client behaviour was incorrect, causing the connection to close
-const CLIENT_ERROR_CODE: u32 = 1;
 // Flor protocol string for ALPN
 const FLOR_ALPN: &str = "flor/1";
 
+/// The result of one successful [`QuicEndpoint::accept`] step (`Err` is a fault).
+enum AcceptOutcome {
+    /// A connection was authenticated and dispatched; keep accepting.
+    Dispatched,
+    /// The endpoint has shut down; stop the accept loop.
+    Closed,
+}
+
+/// The SNI routing label for a dial target: the transport's SNI-derivation seam.
+/// Today the rendered `.rete` name; the receiver resolves it by registry lookup,
+/// never by parsing an identity out of it (ADR-0007). Used by both the dialing
+/// side (`connect`) and the publishing side (the registry key).
+fn sni_for(target: &Dialable) -> String {
+    target.render()
+}
+
+/// rustls conversions for a SPIFFE [`X509Svid`] (extension trait).
+///
+/// Lives in the transport layer rather than `identity` so the identity module
+/// stays free of rustls types (`CertifiedKey`, signing keys).
+trait SvidTls {
+    /// The SVID's certificate chain (leaf first) and PKCS#8 private key, as the
+    /// DER types rustls configs consume. No PEM round-trip — `X509Svid` holds DER.
+    fn cert_chain_and_key(&self) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>);
+
+    /// The SVID as a rustls [`CertifiedKey`] — the certificate an endpoint
+    /// presents for this identity.
+    fn certified_key(&self) -> Result<Arc<CertifiedKey>, Report<Error>>;
+}
+
+impl SvidTls for X509Svid {
+    fn cert_chain_and_key(&self) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+        let chain = self
+            .cert_chain()
+            .iter()
+            .map(|c| CertificateDer::from(c.as_bytes().to_vec()))
+            .collect();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            self.private_key().as_bytes().to_vec(),
+        ));
+        (chain, key)
+    }
+
+    fn certified_key(&self) -> Result<Arc<CertifiedKey>, Report<Error>> {
+        let (chain, key) = self.cert_chain_and_key();
+        let signing_key = rustls::crypto::ring::sign::any_supported_type(&key).change_context(
+            Error("SVID private key is not a supported signing key".into()),
+        )?;
+        Ok(Arc::new(CertifiedKey::new(chain, signing_key)))
+    }
+}
+
 impl QuicEndpoint {
     /// Create new QUIC endpoint, uses provided resolver for outgoing connections and works over
-    /// UDP socket. The served service list is managed dynamically via [`ServiceValidator`],
-    /// injected at actor spawn time.
+    /// UDP socket. Published services are managed dynamically through the shared
+    /// `registry`, injected at actor spawn time.
     fn new(
         resolver: Arc<dyn Resolver>,
         socket: std::net::UdpSocket,
-        validator: Arc<dyn ServiceValidator>,
+        registry: Arc<registry::PublishedServices>,
+        trust_bundle: Arc<X509Bundle>,
     ) -> Result<Self, Report<Error>> {
         let runtime = quinn::default_runtime()
             .ok_or_else(|| Error("Failed to get default async runtime".into()))?;
         let async_socket = runtime
             .wrap_udp_socket(socket)
             .change_context(Error("Failed to wrap UDP socket".into()))?;
-        Self::new_with_abstract_socket(resolver, runtime, async_socket, validator)
+        Self::new_with_abstract_socket(resolver, runtime, async_socket, registry, trust_bundle)
     }
 
     /// Create new QUIC endpoint that works over quinn's abstract socket and runtime.
@@ -74,92 +130,118 @@ impl QuicEndpoint {
         resolver: Arc<dyn Resolver>,
         runtime: Arc<dyn quinn::Runtime>,
         socket: Arc<dyn quinn::AsyncUdpSocket>,
-        validator: Arc<dyn ServiceValidator>,
+        registry: Arc<registry::PublishedServices>,
+        trust_bundle: Arc<X509Bundle>,
     ) -> Result<Self, Report<Error>> {
-        // Current impl: single self-signed cert + SNI routing in `accept`.
-        // TODO(#5): replace with SNI routing in certificate provider, when integrating Identity
-        let cert = rcgen::generate_simple_self_signed(vec!["example.rete".into()])
-            .change_context(Error("Failed to generate self-signed cert".into()))?;
-        let cert_der = CertificateDer::from(cert.cert);
-        let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-            cert.signing_key.serialize_der(),
-        ));
-
-        // TODO(#5): enable client auth (mTLS) when implementing Identities
+        // mTLS server: require + validate client certs against the rete bundle,
+        // and present the SVID the SNI routes to (by registry lookup, not parse).
+        let client_verifier = SpiffeClientCertVerifier::new(&trust_bundle)?;
+        let cert_resolver =
+            SpiffeResolvesServerCert::new(registry.clone() as Arc<dyn ServerCertRegistry>);
         let mut server_crypto = rustls::ServerConfig::builder_with_protocol_versions(&[&TLS13])
-            .with_no_client_auth()
-            .with_single_cert(vec![cert_der], key_der)
-            .change_context(Error("Failed to configure server crypto".into()))?;
+            .with_client_cert_verifier(Arc::new(client_verifier))
+            .with_cert_resolver(Arc::new(cert_resolver));
         server_crypto.alpn_protocols = vec![FLOR_ALPN.as_bytes().to_vec()];
         let server_config = ServerConfig::with_crypto(Arc::new(
             QuicServerConfig::try_from(server_crypto)
                 .change_context(Error("Failed to create server config".into()))?,
         ));
 
-        let mut client_crypto = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(InsecureServerVerifier::new())
-            .with_no_client_auth();
-        client_crypto.alpn_protocols = vec![FLOR_ALPN.as_bytes().to_vec()];
-        let client_config = ClientConfig::new(Arc::new(
-            QuicClientConfig::try_from(client_crypto)
-                .change_context(Error("Failed to create client config".into()))?,
-        ));
-
-        let mut endpoint = Endpoint::new_with_abstract_socket(
+        // No default client config: `connect` builds a per-call mTLS `ClientConfig`
+        // (caller SVID + per-target verifier) and dials via `connect_with`.
+        let endpoint = Endpoint::new_with_abstract_socket(
             quinn::EndpointConfig::default(),
             Some(server_config),
             socket,
             runtime,
         )
         .change_context(Error("Failed to create QUIC endpoint".into()))?;
-        endpoint.set_default_client_config(client_config);
 
         Ok(Self {
             endpoint,
             resolver,
-            validator,
+            registry,
+            trust_bundle,
         })
     }
 
-    /// Connect to the specified service.
-    async fn connect(&self, connect_to: &str) -> Result<QuicConnection, Report<Error>> {
-        let dest_addr = self.resolver.resolve(connect_to).await?;
-        let conn_error = || Error(format!("Failed to connect to {connect_to}"));
+    /// Dial `target` as `caller`, establishing an mTLS QUIC connection.
+    ///
+    /// Builds a per-call [`ClientConfig`]: the caller SVID is presented as the
+    /// client cert, and a [`SpiffeServerCertVerifier`] gates the server on
+    /// `target`'s identity (SAN), not on SNI. SNI carries only the routing label
+    /// from [`sni_for`]. The returned connection's peer is `target` — the verifier
+    /// proved the server's SAN equals it.
+    async fn connect(
+        &self,
+        caller: &X509Svid,
+        target: &Dialable,
+    ) -> Result<QuicConnection, Report<Error>> {
+        let dest_addr = self.resolver.resolve(target.id()).await?;
+        let sni = sni_for(target);
+        let client_config = self.client_config(caller, target)?;
+        let conn_error = || Error(format!("Failed to connect to {}", target.id()));
         self.endpoint
-            .connect(dest_addr, connect_to)
+            .connect_with(client_config, dest_addr, &sni)
             .change_context_lazy(conn_error)?
             .await
             .change_context_lazy(conn_error)
-            .map(QuicConnection::new)
+            .map(|conn| QuicConnection::new(conn, target.id().clone()))
     }
 
-    /// Accept an incoming connection, returning `Some((service_name, conn))` on success,
-    /// or `None` when the endpoint is closed or encounters a terminal error.
+    /// Build the per-call client mTLS config for dialing `target` as `caller`.
+    fn client_config(
+        &self,
+        caller: &X509Svid,
+        target: &Dialable,
+    ) -> Result<ClientConfig, Report<Error>> {
+        let verifier = Arc::new(SpiffeServerCertVerifier::new(
+            &self.trust_bundle,
+            target.id().clone(),
+        )?);
+        let (chain, key) = caller.cert_chain_and_key();
+        let mut crypto = rustls::ClientConfig::builder_with_protocol_versions(&[&TLS13])
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_client_auth_cert(chain, key)
+            .change_context(Error("Failed to configure client crypto".into()))?;
+        crypto.alpn_protocols = vec![FLOR_ALPN.as_bytes().to_vec()];
+        Ok(ClientConfig::new(Arc::new(
+            QuicClientConfig::try_from(crypto)
+                .change_context(Error("Failed to create client config".into()))?,
+        )))
+    }
+
+    /// Accept one incoming connection and dispatch it to the subscriber that
+    /// published the dialed service.
     ///
-    /// Transient errors (e.g., handshake failures, unknown SNI, etc) are logged at `debug` level
-    /// and ignored: the endpoint continues accepting.
-    /// Only unrecoverable errors cause `None` return.
-    async fn accept(&self) -> Option<(String, QuicConnection)> {
+    /// Returns [`AcceptOutcome::Dispatched`] after handling a connection (keep
+    /// calling), or [`AcceptOutcome::Closed`] once the endpoint has shut down.
+    /// `Err` is an endpoint **fault** — CID exhaustion, or an internal
+    /// inconsistency (non-rustls handshake data, a completed handshake carrying no
+    /// SNI, or an unresolvable peer SPIFFE identity) — which means valid
+    /// connections may be getting dropped; the caller stops the loop and can
+    /// surface it (e.g. telemetry). The offending connection is closed here first.
+    ///
+    /// A handshake failure, or a service unpublished since its cert was resolved
+    /// (a benign race), is logged and skipped internally. The mTLS handshake is
+    /// the security gate: the client verifier validated the peer chain + SAN, the
+    /// cert resolver presented our SVID.
+    async fn accept(&self) -> Result<AcceptOutcome, Report<Error>> {
         loop {
             // Wait for an incoming connection attempt
             let conn_fut = match self.endpoint.accept().await {
-                None => {
-                    log::debug!("Endpoint closed, stopping accept loop");
-                    return None;
-                }
+                None => return Ok(AcceptOutcome::Closed),
                 Some(fut) => fut,
             };
 
-            // Attempt to complete the handshake
+            // Attempt to complete the handshake (mTLS: peer chain + SAN validated)
             let conn = match conn_fut.await {
                 Ok(conn) => conn,
                 Err(quinn::ConnectionError::CidsExhausted) => {
-                    // Connection ID space exhausted: endpoint cannot accept more connections.
-                    // This is a terminal condition indicating a configuration issue with
-                    // the CID generator.
-                    log::error!("Endpoint exhausted Connection IDs, stopping accept loop");
-                    return None;
+                    // Connection ID space exhausted: a terminal fault indicating a
+                    // configuration issue with the CID generator.
+                    bail!(Error("Endpoint exhausted connection IDs".into()));
                 }
                 Err(e) => {
                     // Transient connection errors: log and continue accepting
@@ -169,23 +251,48 @@ impl QuicEndpoint {
                 }
             };
 
-            let conn = QuicConnection::new(conn);
+            let accepted = AcceptedConnection::new(conn);
 
-            match self.validate_connection(&conn) {
-                Ok(service_name) => {
-                    log::debug!("Accepted connection for service '{service_name}'");
-                    return Some((service_name, conn));
+            // Routing label (SNI) selects which published service was dialed. The
+            // cert resolver required it to complete the handshake, so an error
+            // here is an internal fault.
+            let sni = match accepted.sni() {
+                Ok(sni) => sni,
+                Err(e) => {
+                    accepted.close(ENDPOINT_CLOSE_CODE, b"internal-error");
+                    return Err(e);
                 }
-                Err(ValidationError::Reject { reason }) => {
-                    conn.close(CLIENT_ERROR_CODE, reason);
-                    continue;
+            };
+
+            // Resolve the SNI to (target identity, dispatch channel). The service's
+            // cert was published when the handshake resolved it, so a miss now means
+            // it was unpublished in the gap since — a benign race; drop and continue.
+            let Some((target, dispatch)) = self.registry.route(&sni) else {
+                log::debug!("Dropping connection for '{sni}': service unpublished since handshake");
+                accepted.close(ENDPOINT_CLOSE_CODE, b"service-unavailable");
+                continue;
+            };
+
+            // Resolve the peer's identity from its cert SAN. Failure here is an
+            // internal inconsistency — the handshake guaranteed a SPIFFE peer.
+            let peer_id = match accepted.peer_id() {
+                Ok(peer_id) => peer_id,
+                Err(e) => {
+                    accepted.close(ENDPOINT_CLOSE_CODE, b"internal-error");
+                    return Err(e.change_context(Error(format!(
+                        "Failed to resolve peer identity for connection to '{target}'"
+                    ))));
                 }
-                Err(ValidationError::Internal(e)) => {
-                    log::error!("Internal error: {e}, stopping accept loop");
-                    conn.close(ENDPOINT_CLOSE_CODE, b"internal-error");
-                    return None;
-                }
+            };
+            log::debug!("Accepted connection for '{target}' from peer '{peer_id}'");
+
+            let conn = accepted.into_connection(peer_id);
+            if dispatch.send((target, conn)).await.is_err() {
+                // Subscriber dropped its acceptor; the stale entry is reaped on
+                // the next publish.
+                log::debug!("Subscriber for '{sni}' dropped; connection discarded");
             }
+            return Ok(AcceptOutcome::Dispatched);
         }
     }
 
@@ -194,56 +301,29 @@ impl QuicEndpoint {
         self.endpoint
             .close(VarInt::from_u32(ENDPOINT_CLOSE_CODE), b"endpoint-closed");
     }
-
-    fn validate_connection<C: Inspect>(&self, conn: &C) -> Result<String, ValidationError> {
-        // Extract SNI from handshake data
-        let service_name = conn
-            .handshake_data()
-            .map_err(ValidationError::Internal)?
-            .server_name
-            .ok_or_else(|| {
-                log::debug!("Connection missing SNI, rejecting");
-                ValidationError::Reject {
-                    reason: b"missing-sni",
-                }
-            })?;
-
-        if !self.validator.is_served(&service_name) {
-            log::debug!("Connection to unknown service '{service_name}', rejecting");
-            return Err(ValidationError::Reject {
-                reason: b"unknown-service",
-            });
-        }
-        Ok(service_name)
-    }
-}
-
-#[derive(Debug)]
-enum ValidationError {
-    Reject { reason: &'static [u8] },
-    Internal(Report<Error>),
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::core::identity::{Ca, TrustDomain, load_bundle_from_pem};
     use crate::core::transport::resolver::MockResolver;
-    use mocks::{MockAsyncUdpSocket, MockEndpoint, MockIncoming, MockInspectConn, MockRuntime};
+    use mocks::{MockAsyncUdpSocket, MockEndpoint, MockIncoming, MockRuntime};
 
     // We need to serialize tests because of global mocks for static functions in mockall
     use serial_test::serial;
 
-    struct TestValidator(Vec<String>);
-
-    impl ServiceValidator for TestValidator {
-        fn is_served(&self, service: &str) -> bool {
-            self.0.iter().any(|s| s == service)
-        }
+    /// A trust bundle from a throwaway CA. It must carry a real authority (the
+    /// client-cert verifier rejects an empty root store), but the accept-path
+    /// tests never complete a handshake, so its identity is otherwise irrelevant.
+    fn make_test_trust_bundle() -> Arc<X509Bundle> {
+        let td = TrustDomain::new("demo.flor").unwrap();
+        let ca = Ca::init(&td, std::time::Duration::from_secs(3600)).unwrap();
+        Arc::new(load_bundle_from_pem(&td, ca.cert_pem().as_bytes()).unwrap())
     }
 
     /// Core setup: creates mock context, socket, runtime, and attempts construction.
     fn setup_endpoint_creation(
-        validator: Arc<dyn ServiceValidator>,
         mut mock_setup: impl FnMut() -> std::io::Result<MockEndpoint> + Send + 'static,
     ) -> Result<QuicEndpoint, Report<Error>> {
         let ctx = MockEndpoint::new_with_abstract_socket_context();
@@ -255,24 +335,19 @@ mod test {
             Arc::new(MockResolver::new()),
             runtime,
             sock,
-            validator,
+            registry::PublishedServices::new(),
+            make_test_trust_bundle(),
         )
     }
 
     /// Convenience wrapper for tests that need a successfully created endpoint
-    /// with custom `accept()` behavior.
-    ///
-    /// Injects a [`TestValidator`] that recognises `"test_service"`, matching the
-    /// service name used across the validate_connection tests.
+    /// with custom `accept()` behavior. The registry starts empty — the accept
+    /// loop tests exercise only the pre-handshake error paths.
     fn setup_endpoint_for_accept(
         mut configure_accept: impl FnMut(&mut MockEndpoint) + Send + 'static,
     ) -> QuicEndpoint {
-        let validator = Arc::new(TestValidator(vec!["test_service".into()]));
-        setup_endpoint_creation(validator, move || {
+        setup_endpoint_creation(move || {
             let mut mock = MockEndpoint::new();
-            mock.expect_set_default_client_config()
-                .times(1)
-                .return_const(());
             configure_accept(&mut mock);
             Ok(mock)
         })
@@ -291,7 +366,7 @@ mod test {
     #[test]
     #[serial]
     fn test_failure_to_create_quinn_endpoint() {
-        let res = setup_endpoint_creation(Arc::new(TestValidator(vec![])), || {
+        let res = setup_endpoint_creation(|| {
             Err(std::io::Error::new(
                 std::io::ErrorKind::AddrInUse,
                 "Mock IO error",
@@ -314,7 +389,10 @@ mod test {
                 .times(1)
                 .returning(|| Box::pin(async { None }));
         });
-        assert!(endpoint.accept().await.is_none());
+        assert!(
+            matches!(endpoint.accept().await, Ok(AcceptOutcome::Closed)),
+            "a closed endpoint reports Closed, not a fault"
+        );
     }
 
     #[tokio::test]
@@ -326,8 +404,8 @@ mod test {
                 Box::pin(async { Some(mock_incoming_error(quinn::ConnectionError::CidsExhausted)) })
             });
         });
-        // Should return None when CidsExhausted (terminal error) occurs
-        assert!(endpoint.accept().await.is_none());
+        // CID exhaustion is a terminal fault, surfaced as an error.
+        assert!(endpoint.accept().await.is_err());
     }
 
     #[tokio::test]
@@ -343,75 +421,13 @@ mod test {
                 .times(1)
                 .returning(|| Box::pin(async { None }));
         });
-        assert!(endpoint.accept().await.is_none());
+        assert!(
+            matches!(endpoint.accept().await, Ok(AcceptOutcome::Closed)),
+            "a transient handshake error is skipped; the later close ends the loop"
+        );
     }
 
-    #[test]
-    #[serial]
-    fn test_validate_connection_success() {
-        let endpoint = setup_endpoint_for_accept(|_| {}); // served = vec!["test_service"]
-        let mut mock_conn = MockInspectConn::new();
-        mock_conn.expect_handshake_data().returning(|| {
-            Ok(quinn::crypto::rustls::HandshakeData {
-                server_name: Some("test_service".into()),
-                protocol: None,
-            })
-        });
-
-        let service_name = endpoint
-            .validate_connection(&mock_conn)
-            .expect("Expected successful validation");
-        assert_eq!(service_name, "test_service");
-    }
-
-    #[test]
-    #[serial]
-    fn test_validate_connection_missing_sni() {
-        let endpoint = setup_endpoint_for_accept(|_| {});
-        let mut mock_conn = MockInspectConn::new();
-        mock_conn.expect_handshake_data().returning(|| {
-            Ok(quinn::crypto::rustls::HandshakeData {
-                server_name: None,
-                protocol: None,
-            })
-        });
-
-        match endpoint.validate_connection(&mock_conn) {
-            Err(ValidationError::Reject { reason }) => assert_eq!(reason, b"missing-sni"),
-            other => panic!("Expected Reject, got {other:?}"),
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_validate_connection_unknown_service() {
-        let endpoint = setup_endpoint_for_accept(|_| {});
-        let mut mock_conn = MockInspectConn::new();
-        mock_conn.expect_handshake_data().returning(|| {
-            Ok(quinn::crypto::rustls::HandshakeData {
-                server_name: Some("unknown_svc".into()),
-                protocol: None,
-            })
-        });
-
-        match endpoint.validate_connection(&mock_conn) {
-            Err(ValidationError::Reject { reason }) => assert_eq!(reason, b"unknown-service"),
-            other => panic!("Expected Reject, got {other:?}"),
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_validate_connection_no_handshake_data() {
-        let endpoint = setup_endpoint_for_accept(|_| {});
-        let mut mock_conn = MockInspectConn::new();
-        mock_conn
-            .expect_handshake_data()
-            .returning(|| Err(Report::new(Error("Mock internal error".into()))));
-
-        match endpoint.validate_connection(&mock_conn) {
-            Err(ValidationError::Internal(_)) => {} // Expected path
-            other => panic!("Expected Internal, got {other:?}"),
-        }
-    }
+    // The accept success path (SNI → registry route, peer-SAN extraction,
+    // authenticate, dispatch) needs a completed mTLS handshake, which a mock
+    // `quinn::Connection` can't produce; it's covered by the integration test.
 }

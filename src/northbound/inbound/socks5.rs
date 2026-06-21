@@ -6,13 +6,13 @@ use error_stack::{FutureExt, IntoReport, Report, ResultExt, bail};
 use fast_socks5::server::Socks5ServerProtocol;
 use fast_socks5::util::target_addr::TargetAddr;
 use fast_socks5::{ReplyError, Socks5Command};
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 
+use crate::core::identity::{Dialable, X509Svid};
 use crate::core::transport::QuicConnector;
 use crate::impl_lifecycle_handle;
 use crate::utils::lifecycle::LifecycleHandle;
@@ -29,9 +29,11 @@ pub struct Error(String);
 /// Tests substitute a lightweight in-process mock.
 #[async_trait]
 trait QuicBackend: Send + Sync {
+    /// Open a bidirectional stream to `target`, authenticating as `caller`.
     async fn open_stream(
         &self,
-        target: &str,
+        caller: &X509Svid,
+        target: &Dialable,
     ) -> Result<
         (
             Box<dyn AsyncWrite + Unpin + Send>,
@@ -43,9 +45,9 @@ trait QuicBackend: Send + Sync {
 
 #[derive(Debug, thiserror::Error)]
 enum BackendError {
-    #[error("connect failed")]
+    #[error("Connect failed")]
     ConnectFailed,
-    #[error("stream open failed")]
+    #[error("Stream open failed")]
     OpenStreamFailed,
 }
 
@@ -53,7 +55,8 @@ enum BackendError {
 impl QuicBackend for QuicConnector {
     async fn open_stream(
         &self,
-        target: &str,
+        caller: &X509Svid,
+        target: &Dialable,
     ) -> Result<
         (
             Box<dyn AsyncWrite + Unpin + Send>,
@@ -64,7 +67,7 @@ impl QuicBackend for QuicConnector {
         use crate::core::transport::endpoint::connection::Open;
 
         let conn = self
-            .connect(target)
+            .connect(caller, target)
             .await
             .change_context(BackendError::ConnectFailed)?;
 
@@ -89,25 +92,27 @@ impl_lifecycle_handle!(Socks5Handle);
 
 /// SOCKS5 inbound component.
 ///
-/// Accepts TCP connections on client-specific listeners, performs the SOCKS5
+/// Accepts TCP connections on per-principal listeners, performs the SOCKS5
 /// handshake, then forwards each `TCP_CONNECT` request to the given
-/// [`QuicConnector`]. The domain name from the SOCKS5 target address is used
-/// directly as the QUIC service name.
+/// [`QuicConnector`], authenticating as the listener's caller SVID. The domain
+/// name from the SOCKS5 target address is resolved to a [`Dialable`] identity
+/// against the caller's trust domain.
 ///
 /// # Lifecycle
 ///
 /// Call [`spawn`](Self::spawn) to start and obtain a [`Socks5Handle`].
 /// Dropping the handle stops all accept loops.
 pub struct Socks5Inbound {
-    listeners: HashMap<String, TcpListener>,
+    /// One listener per principal, each paired with the caller SVID it serves.
+    listeners: Vec<(Arc<X509Svid>, TcpListener)>,
     backend: Arc<dyn QuicBackend>,
 }
 
 impl Socks5Inbound {
-    /// Bind client-specific listeners and return a component ready to be started via
-    /// [`spawn`](Self::spawn).
+    /// Bind one listener per `(caller SVID, listen address)` and return a
+    /// component ready to be started via [`spawn`](Self::spawn).
     pub async fn new(
-        bindings: HashMap<String, SocketAddr>,
+        bindings: Vec<(X509Svid, SocketAddr)>,
         connector: QuicConnector,
     ) -> Result<Self, Report<Error>> {
         let listeners = bind_listeners(bindings).await?;
@@ -124,9 +129,9 @@ impl Socks5Inbound {
 
     async fn run(self) {
         let mut tasks = JoinSet::new();
-        for (service_name, listener) in self.listeners {
+        for (caller, listener) in self.listeners {
             let backend = self.backend.clone();
-            tasks.spawn(run_listener(service_name, listener, backend));
+            tasks.spawn(run_listener(caller, listener, backend));
         }
 
         // Any listener stopping terminates the whole inbound. Dropping the set
@@ -136,43 +141,45 @@ impl Socks5Inbound {
 }
 
 async fn bind_listeners(
-    bindings: HashMap<String, SocketAddr>,
-) -> Result<HashMap<String, TcpListener>, Report<Error>> {
-    let mut listeners = HashMap::with_capacity(bindings.len());
-    for (service_name, listen_addr) in bindings {
+    bindings: Vec<(X509Svid, SocketAddr)>,
+) -> Result<Vec<(Arc<X509Svid>, TcpListener)>, Report<Error>> {
+    let mut listeners = Vec::with_capacity(bindings.len());
+    for (caller, listen_addr) in bindings {
         let listener = TcpListener::bind(listen_addr)
             .await
             .change_context_lazy(|| {
                 Error(format!(
-                    "Failed to bind SOCKS5 service '{service_name}' to {listen_addr}"
+                    "Failed to bind SOCKS5 listener for '{}' to {listen_addr}",
+                    caller.spiffe_id()
                 ))
             })?;
-        listeners.insert(service_name, listener);
+        listeners.push((Arc::new(caller), listener));
     }
     Ok(listeners)
 }
 
-async fn run_listener(service_name: String, listener: TcpListener, backend: Arc<dyn QuicBackend>) {
+async fn run_listener(caller: Arc<X509Svid>, listener: TcpListener, backend: Arc<dyn QuicBackend>) {
+    let principal = caller.spiffe_id().clone();
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
             result = listener.accept() => match result {
                 Ok((stream, peer_addr)) => {
                     log::debug!(target: LOG_TARGET,
-                        "Accepted connection from {peer_addr} via SOCKS5 service '{service_name}'");
+                        "Accepted connection from {peer_addr} for principal '{principal}'");
                     let backend = backend.clone();
-                    let service_name = service_name.clone();
+                    let caller = caller.clone();
+                    let principal = principal.clone();
                     tasks.spawn(async move {
-                        if let Err(e) = handle_socks5(stream, backend).await {
+                        if let Err(e) = handle_socks5(stream, backend, caller).await {
                             log::warn!(target: LOG_TARGET,
-                                "Connection from {peer_addr} via SOCKS5 service '{service_name}'
-                                error: {e:?}");
+                                "Connection from {peer_addr} via SOCKS5 for principal '{principal}' error: {e:?}");
                         }
                     });
                 }
                 Err(e) => {
                     log::error!(target: LOG_TARGET,
-                        "SOCKS5 service '{service_name}' accept error: {e:?}");
+                        "SOCKS5 listener for '{principal}' accept error: {e:?}");
                     break;
                 }
             },
@@ -189,6 +196,7 @@ async fn run_listener(service_name: String, listener: TcpListener, backend: Arc<
 async fn handle_socks5(
     stream: TcpStream,
     backend: Arc<dyn QuicBackend>,
+    caller: Arc<X509Svid>,
 ) -> Result<(), Report<Error>> {
     // Step 1: SOCKS5 handshake.
     let proto = Socks5ServerProtocol::accept_no_auth(stream)
@@ -209,8 +217,8 @@ async fn handle_socks5(
         return Ok(());
     }
 
-    // Step 3: Build the target address string passed to the connector.
-    let target = match &target_addr {
+    // Step 3: Take the `.rete` hostname; IP targets are not addressable by identity.
+    let host = match &target_addr {
         TargetAddr::Domain(host, _port) => host.clone(),
         TargetAddr::Ip(addr) => {
             log::debug!(target: LOG_TARGET, "Received IP target {addr}, which is not supported by the connector");
@@ -222,8 +230,22 @@ async fn handle_socks5(
         }
     };
 
-    // Step 4: Open QUIC connection and bidirectional stream to the target.
-    let (mut quic_send, mut quic_recv) = match backend.open_stream(&target).await {
+    // Step 4: Resolve the hostname to a dial target against the caller's trust
+    // domain (inbound builds services only; see ADR-0007).
+    let target = match Dialable::resolve(&host, caller.spiffe_id().trust_domain()) {
+        Ok(target) => target,
+        Err(e) => {
+            log::debug!(target: LOG_TARGET, "Cannot resolve target '{host}': {e:?}");
+            proto
+                .reply_error(&ReplyError::HostUnreachable)
+                .change_context(Error("Failed to reply to unresolvable target".into()))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    // Step 5: Open QUIC connection and bidirectional stream to the target.
+    let (mut quic_send, mut quic_recv) = match backend.open_stream(&caller, &target).await {
         Ok(streams) => streams,
         Err(e) => {
             let reply = match e.current_context() {
@@ -231,7 +253,7 @@ async fn handle_socks5(
                 BackendError::OpenStreamFailed => ReplyError::GeneralFailure,
             };
             let _ = proto.reply_error(&reply).await;
-            bail!(e.change_context(Error(format!("Backend failure for '{target}'"))))
+            bail!(e.change_context(Error(format!("Backend failure for '{host}'"))))
         }
     };
 
@@ -245,7 +267,7 @@ async fn handle_socks5(
         .await?;
     let (mut client_read, mut client_write) = tokio::io::split(client_stream);
 
-    log::debug!(target: LOG_TARGET, "Relaying traffic for '{target}'");
+    log::debug!(target: LOG_TARGET, "Relaying traffic for '{host}'");
 
     let client_to_quic = async {
         let _ = tokio::io::copy(&mut client_read, &mut quic_send).await?;
@@ -257,10 +279,10 @@ async fn handle_socks5(
     };
     let (client_to_quic, quic_to_client) = tokio::join!(client_to_quic, quic_to_client);
     if let Err(e) = client_to_quic {
-        log::debug!(target: LOG_TARGET, "Client->QUIC relay error for '{target}': {e:?}");
+        log::debug!(target: LOG_TARGET, "Client->QUIC relay error for '{host}': {e:?}");
     }
     if let Err(e) = quic_to_client {
-        log::debug!(target: LOG_TARGET, "QUIC->Client relay error for '{target}': {e:?}");
+        log::debug!(target: LOG_TARGET, "QUIC->Client relay error for '{host}': {e:?}");
     }
 
     Ok(())
@@ -282,19 +304,36 @@ mod tests {
         (listener, addr)
     }
 
+    /// Mint a caller SVID `spiffe://demo.flor/user/<name>` from a throwaway CA.
+    /// The backend is mocked, so the cert isn't validated — only its trust domain
+    /// (`demo.flor`) matters, as it's the context for resolving `.rete` targets.
+    fn caller_svid(name: &str) -> X509Svid {
+        use crate::core::identity::{
+            Ca, Kind, SpiffeId, TrustDomain, keygen_csr, load_svid_from_pem,
+        };
+        let td = TrustDomain::new("demo.flor").unwrap();
+        let ca = Ca::init(&td, Duration::from_secs(3600)).unwrap();
+        let id = SpiffeId::new(format!("spiffe://demo.flor/user/{name}")).unwrap();
+        let (key, csr) = keygen_csr(&id).unwrap();
+        let leaf = ca
+            .sign_csr(csr.as_bytes(), &id, Kind::User, Duration::from_secs(3600))
+            .unwrap();
+        load_svid_from_pem(leaf.as_bytes(), key.serialize_pem().as_bytes()).unwrap()
+    }
+
     fn inbound(listener: TcpListener, backend: impl QuicBackend + 'static) -> Socks5Inbound {
-        inbound_with_listeners(
-            HashMap::from([("test-client".to_string(), listener)]),
-            backend,
-        )
+        inbound_with_listeners(vec![(caller_svid("alice"), listener)], backend)
     }
 
     fn inbound_with_listeners(
-        listeners: HashMap<String, TcpListener>,
+        bindings: Vec<(X509Svid, TcpListener)>,
         backend: impl QuicBackend + 'static,
     ) -> Socks5Inbound {
         Socks5Inbound {
-            listeners,
+            listeners: bindings
+                .into_iter()
+                .map(|(svid, listener)| (Arc::new(svid), listener))
+                .collect(),
             backend: Arc::new(backend),
         }
     }
@@ -338,7 +377,8 @@ mod tests {
     impl QuicBackend for MockFailingQuicBackend {
         async fn open_stream(
             &self,
-            _target: &str,
+            _caller: &X509Svid,
+            _target: &Dialable,
         ) -> Result<
             (
                 Box<dyn AsyncWrite + Unpin + Send>,
@@ -347,6 +387,27 @@ mod tests {
             Report<BackendError>,
         > {
             Err(Report::new(BackendError::ConnectFailed))
+        }
+    }
+
+    /// Backend that must never be reached — used to prove the target was rejected
+    /// before any dial was attempted.
+    struct MockUnreachableQuicBackend;
+
+    #[async_trait]
+    impl QuicBackend for MockUnreachableQuicBackend {
+        async fn open_stream(
+            &self,
+            _caller: &X509Svid,
+            _target: &Dialable,
+        ) -> Result<
+            (
+                Box<dyn AsyncWrite + Unpin + Send>,
+                Box<dyn AsyncRead + Unpin + Send>,
+            ),
+            Report<BackendError>,
+        > {
+            panic!("backend must not be dialed for an unresolvable target");
         }
     }
 
@@ -375,7 +436,8 @@ mod tests {
     impl QuicBackend for MockConnectedQuicBackend {
         async fn open_stream(
             &self,
-            _target: &str,
+            _caller: &X509Svid,
+            _target: &Dialable,
         ) -> Result<
             (
                 Box<dyn AsyncWrite + Unpin + Send>,
@@ -401,10 +463,10 @@ mod tests {
         let (alice_listener, alice_addr) = bound_listener().await;
         let (bob_listener, bob_addr) = bound_listener().await;
         let _handle = inbound_with_listeners(
-            HashMap::from([
-                ("alice".to_string(), alice_listener),
-                ("bob".to_string(), bob_listener),
-            ]),
+            vec![
+                (caller_svid("alice"), alice_listener),
+                (caller_svid("bob"), bob_listener),
+            ],
             MockFailingQuicBackend,
         )
         .spawn();
@@ -419,10 +481,10 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
 
-        let result = bind_listeners(HashMap::from([
-            ("alice".to_string(), addr),
-            ("bob".to_string(), addr),
-        ]))
+        let result = bind_listeners(vec![
+            (caller_svid("alice"), addr),
+            (caller_svid("bob"), addr),
+        ])
         .await;
         assert!(result.is_err(), "duplicate listen address must fail");
 
@@ -483,7 +545,7 @@ mod tests {
         let _handle = inbound(listener, MockFailingQuicBackend).spawn();
 
         let mut client = TcpStream::connect(addr).await.unwrap();
-        socks5_connect(&mut client, "some-service", 80).await;
+        socks5_connect(&mut client, "api.demo.flor.rete", 80).await;
 
         let mut reply = [0u8; 10];
         let n = tokio::time::timeout(Duration::from_secs(2), client.read(&mut reply))
@@ -496,14 +558,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_foreign_trust_domain_target_gets_host_unreachable() {
+        // The caller is in `demo.flor`; a target in another rete can't be resolved
+        // against the caller's trust domain, so the dial is rejected *before* the
+        // backend is reached (the backend panics if called).
+        let (listener, addr) = bound_listener().await;
+        let _handle = inbound(listener, MockUnreachableQuicBackend).spawn();
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        socks5_connect(&mut client, "api.other-rete.rete", 80).await;
+
+        let mut reply = [0u8; 10];
+        let n = tokio::time::timeout(Duration::from_secs(2), client.read(&mut reply))
+            .await
+            .expect("timeout")
+            .expect("read error");
+        assert!(n > 0);
+        assert_eq!(reply[0], 0x05);
+        assert_eq!(
+            reply[1], 0x04,
+            "HostUnreachable for a target in a foreign trust domain"
+        );
+    }
+
+    #[tokio::test]
     async fn test_shutdown_stops_all_listeners() {
         let (alice_listener, alice_addr) = bound_listener().await;
         let (bob_listener, bob_addr) = bound_listener().await;
         let handle = inbound_with_listeners(
-            HashMap::from([
-                ("alice".to_string(), alice_listener),
-                ("bob".to_string(), bob_listener),
-            ]),
+            vec![
+                (caller_svid("alice"), alice_listener),
+                (caller_svid("bob"), bob_listener),
+            ],
             MockFailingQuicBackend,
         )
         .spawn();
@@ -533,7 +619,7 @@ mod tests {
 
         // Connect as SOCKS5 client and complete the handshake
         let mut client = TcpStream::connect(addr).await.unwrap();
-        socks5_connect(&mut client, "some-service", 80).await;
+        socks5_connect(&mut client, "api.demo.flor.rete", 80).await;
 
         // Read SOCKS5 success reply (10 bytes: ver, rep, rsv, atyp, 4-byte addr, 2-byte port)
         let mut reply = [0u8; 10];

@@ -1,12 +1,12 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-use std::{collections::HashMap, net::SocketAddr};
+use std::net::SocketAddr;
 
 use error_stack::ResultExt;
 
 use crate::{
-    core::transport::QuicConnector,
+    core::{identity::X509Svid, transport::QuicConnector},
     northbound::inbound::socks5::{Socks5Handle, Socks5Inbound},
     utils::report::ErrorReport,
 };
@@ -17,15 +17,17 @@ pub mod socks5;
 #[error("{0}")]
 pub struct Error(String);
 
+/// SOCKS5 listener targets: each caller principal's SVID and its local listen
+/// address. One listener is bound per entry, serving exactly that principal.
 #[derive(Debug, Clone)]
-pub struct Socks5Bindings(pub HashMap<String, SocketAddr>);
+pub struct Socks5Bindings(pub Vec<(X509Svid, SocketAddr)>);
 
 /// Dependencies required to construct an [`InboundBundle`].
 ///
 /// This groups inbound listener inputs consumed by [`InboundBundle::try_new`].
 #[fundle::deps]
 pub struct InboundDeps {
-    /// Local SOCKS5 listener addresses keyed by client service name.
+    /// SOCKS5 caller SVIDs and their local listen addresses.
     ///
     /// When empty, SOCKS5 inbound is disabled.
     socks5_bindings: Socks5Bindings,
@@ -65,8 +67,11 @@ async fn init_socks5(deps: &InboundDeps) -> Result<Option<Socks5Handle>, ErrorRe
                 .await
                 .change_context(Error("Failed to create SOCKS5 inbound".into()))?
                 .spawn();
-        for (service_name, addr) in &deps.socks5_bindings.0 {
-            log::info!("SOCKS5 service '{service_name}' listening on {addr}");
+        for (svid, addr) in &deps.socks5_bindings.0 {
+            log::info!(
+                "SOCKS5 proxy for principal '{}' listening on {addr}",
+                svid.spiffe_id()
+            );
         }
         Some(socks5)
     };
