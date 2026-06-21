@@ -40,14 +40,23 @@ const RETE_TLD: &str = "rete";
 
 /// A [`SpiffeId`] that can be a `connect` target: a `Service` or `Vertex`.
 ///
-/// Validated at construction, so it always has a `.rete` hostname
-/// ([`render`](Self::render) is infallible) and a well-formed path.
+/// Fully parsed and validated at construction — the [`Kind`], [`Scope`], and leaf
+/// name are extracted once and stored — so every accessor is infallible and a
+/// constructed `Dialable` is always a well-formed service/vertex identity with a
+/// `.rete` hostname.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Dialable(SpiffeId);
+pub struct Dialable {
+    id: SpiffeId,
+    kind: Kind,
+    scope: Scope,
+    /// The leaf path segment — the service/vertex name.
+    name: String,
+}
 
 impl Dialable {
     /// Wrap a [`SpiffeId`], requiring its kind to be `Service` or `Vertex` and
-    /// its path to be a well-formed rete- or node-scoped shape.
+    /// its path to be a well-formed rete- or node-scoped shape. All structural
+    /// pieces are parsed here so later use cannot fail.
     pub fn new(id: SpiffeId) -> Result<Self, Report<Error>> {
         let kind = kind_of(&id)?;
         if !matches!(kind, Kind::Service | Kind::Vertex) {
@@ -55,34 +64,33 @@ impl Dialable {
                 "SPIFFE kind {kind} is not dialable: only service and vertex have a .rete hostname"
             )));
         }
-        // Validate the path shape now so `render` can be infallible.
-        scope_of(&id)?;
-        Ok(Self(id))
+        let scope = scope_of(&id)?;
+        let name = leaf_name(&id)?.to_string();
+        Ok(Self {
+            id,
+            kind,
+            scope,
+            name,
+        })
     }
 
     /// The wrapped canonical identity.
     pub fn id(&self) -> &SpiffeId {
-        &self.0
-    }
-
-    /// Consume into the wrapped [`SpiffeId`].
-    pub fn into_id(self) -> SpiffeId {
-        self.0
+        &self.id
     }
 
     /// The dialable kind (`Service` or `Vertex`).
     pub fn kind(&self) -> Kind {
-        kind_of(&self.0).expect("Dialable validates kind at construction")
+        self.kind
     }
 
-    /// Synthesise the `.rete` convenience hostname. Infallible: a `Dialable` is
-    /// always a well-formed service/vertex identity. Trust domains may be dotted.
+    /// Synthesise the `.rete` convenience hostname. Infallible (everything was
+    /// validated at construction). Trust domains may be dotted.
     pub fn render(&self) -> String {
-        let td = self.0.trust_domain().as_str();
-        let name = leaf_name(&self.0).expect("Dialable always has a name segment");
-        match scope_of(&self.0).expect("Dialable validates path shape at construction") {
-            Scope::Rete => format!("{name}.{td}.{RETE_TLD}"),
-            Scope::Node(node) => format!("{name}.{node}.{td}.{RETE_TLD}"),
+        let td = self.id.trust_domain().as_str();
+        match &self.scope {
+            Scope::Rete => format!("{}.{td}.{RETE_TLD}", self.name),
+            Scope::Node(node) => format!("{}.{node}.{td}.{RETE_TLD}", self.name),
         }
     }
 
