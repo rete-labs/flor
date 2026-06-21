@@ -10,7 +10,10 @@ use tokio::{
 };
 
 use crate::{
-    core::transport::{QuicAcceptor, QuicPublisher},
+    core::{
+        identity::{SpiffeId, X509Svid},
+        transport::{QuicAcceptor, QuicPublisher},
+    },
     impl_lifecycle_handle,
     northbound::outbound::{QuicInboundConnection, QuicStream},
     utils::lifecycle::LifecycleHandle,
@@ -32,24 +35,32 @@ impl_lifecycle_handle!(TcpDirectHandle);
 
 /// TCP direct outbound component.
 ///
-/// Subscribes to incoming QUIC connections for the configured service names and
-/// forwards every accepted bidirectional stream to the matching TCP address.
+/// Publishes the configured service SVIDs and forwards every accepted
+/// bidirectional stream to the matching local TCP address, keyed by the target
+/// identity the connection was dialed against.
 pub struct TcpDirectOutbound {
     acceptor: QuicAcceptor,
-    bindings: Arc<HashMap<String, SocketAddr>>,
+    bindings: Arc<HashMap<SpiffeId, SocketAddr>>,
 }
 
 impl TcpDirectOutbound {
-    /// Publish the configured service names and return a component ready to start.
+    /// Publish the service SVIDs and return a component ready to start. Each
+    /// `(svid, addr)` binding pairs a served identity with its local TCP upstream.
     pub async fn new(
-        bindings: HashMap<String, SocketAddr>,
+        bindings: Vec<(X509Svid, SocketAddr)>,
         publisher: QuicPublisher,
     ) -> Result<Self, Report<Error>> {
-        let served = bindings.keys().cloned().collect::<Vec<_>>();
+        let svids = bindings.iter().map(|(svid, _)| svid.clone()).collect();
         let acceptor = publisher
-            .publish(served)
+            .publish(svids)
             .await
             .change_context(Error("Failed to publish TCP direct services".into()))?;
+
+        // Re-key the bindings by target identity for accept-time dispatch.
+        let bindings = bindings
+            .into_iter()
+            .map(|(svid, addr)| (svid.spiffe_id().clone(), addr))
+            .collect::<HashMap<_, _>>();
 
         Ok(Self {
             acceptor,
@@ -68,10 +79,10 @@ impl TcpDirectOutbound {
         loop {
             tokio::select! {
                 accepted = self.acceptor.accept() => match accepted {
-                    Some((service_name, conn)) => {
+                    Some((target, conn)) => {
                         let bindings = self.bindings.clone();
                         tasks.spawn(async move {
-                            handle_connection(service_name, conn, bindings).await;
+                            handle_connection(target, conn, bindings).await;
                         });
                     }
                     None => {
@@ -92,14 +103,15 @@ impl TcpDirectOutbound {
 }
 
 async fn handle_connection(
-    service_name: String,
+    target: SpiffeId,
     conn: impl QuicInboundConnection + 'static,
-    bindings: Arc<HashMap<String, SocketAddr>>,
+    bindings: Arc<HashMap<SpiffeId, SocketAddr>>,
 ) {
-    let Some(target_addr) = bindings.get(&service_name).copied() else {
-        log::debug!(target: LOG_TARGET, "No TCP target configured for '{service_name}'");
+    let Some(target_addr) = bindings.get(&target).copied() else {
+        log::debug!(target: LOG_TARGET, "No TCP target configured for '{target}'");
         return;
     };
+    let label = target.to_string();
 
     let mut streams = JoinSet::new();
 
@@ -107,12 +119,12 @@ async fn handle_connection(
         tokio::select! {
             stream = conn.accept_stream() => match stream {
                 Ok(stream) => {
-                    streams.spawn(relay_stream(service_name.clone(), target_addr, stream));
+                    streams.spawn(relay_stream(label.clone(), target_addr, stream));
                 }
                 Err(e) => {
                     log::debug!(
                         target: LOG_TARGET,
-                        "QUIC connection closed for '{service_name}': {e:?}"
+                        "QUIC connection closed for '{label}': {e:?}"
                     );
                     break;
                 }
@@ -121,7 +133,7 @@ async fn handle_connection(
             Some(result) = streams.join_next() => {
                 if let Err(e) = result {
                     log::debug!(target: LOG_TARGET,
-                        "Stream task failed for '{service_name}': {e:?}");
+                        "Stream task failed for '{label}': {e:?}");
                 }
             }
         }
@@ -172,6 +184,10 @@ mod tests {
     use tokio::sync::{Mutex, oneshot};
 
     use super::*;
+
+    fn id(s: &str) -> SpiffeId {
+        SpiffeId::new(s).expect("valid SPIFFE ID")
+    }
 
     async fn bound_listener() -> (TcpListener, SocketAddr) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -241,8 +257,9 @@ mod tests {
 
         let (mut quic_peer, quic_component) = tokio::io::duplex(65536);
         let conn = MockQuicConnection::new(vec![quic_component]);
-        let targets = Arc::new(HashMap::from([("service".to_string(), target_addr)]));
-        let handle = tokio::spawn(handle_connection("service".to_string(), conn, targets));
+        let target = id("spiffe://demo.flor/service/beta/tcp-echo");
+        let bindings = Arc::new(HashMap::from([(target.clone(), target_addr)]));
+        let handle = tokio::spawn(handle_connection(target, conn, bindings));
 
         quic_peer.write_all(b"hello from quic").await.unwrap();
 
@@ -266,11 +283,18 @@ mod tests {
 
         let (_quic_peer, quic_component) = tokio::io::duplex(65536);
         let conn = MockQuicConnection::new(vec![quic_component]);
-        let targets = Arc::new(HashMap::from([("other-service".to_string(), target_addr)]));
+        let bindings = Arc::new(HashMap::from([(
+            id("spiffe://demo.flor/service/beta/other-service"),
+            target_addr,
+        )]));
 
         tokio::time::timeout(
             Duration::from_secs(1),
-            handle_connection("service".to_string(), conn, targets),
+            handle_connection(
+                id("spiffe://demo.flor/service/beta/tcp-echo"),
+                conn,
+                bindings,
+            ),
         )
         .await
         .expect("handler should return when service is not configured");
@@ -285,8 +309,9 @@ mod tests {
 
         let (mut quic_peer, quic_component) = tokio::io::duplex(65536);
         let conn = MockQuicConnection::new(vec![quic_component]);
-        let targets = Arc::new(HashMap::from([("service".to_string(), target_addr)]));
-        let handle = tokio::spawn(handle_connection("service".to_string(), conn, targets));
+        let target = id("spiffe://demo.flor/service/beta/tcp-echo");
+        let bindings = Arc::new(HashMap::from([(target.clone(), target_addr)]));
+        let handle = tokio::spawn(handle_connection(target, conn, bindings));
 
         quic_peer.write_all(b"hello").await.unwrap();
         let mut buf = [0u8; 1];

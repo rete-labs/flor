@@ -10,12 +10,13 @@ use error_stack::Report;
 use mockall::{self, automock};
 
 use super::Error;
+use crate::core::identity::SpiffeId;
 
-/// Resolver of service name into destination socket address.
+/// Resolver of a target identity into a destination socket address.
 /// It is needed for UDP-based transports like QUIC.
 #[cfg_attr(test, automock)]
 #[async_trait]
 pub trait Resolver: Send + Sync {
-    /// Resolve service name into destination socket address (IP and port).
-    async fn resolve(&self, name: &str) -> Result<SocketAddr, Report<Error>>;
+    /// Resolve a target [`SpiffeId`] into a destination socket address (IP and port).
+    async fn resolve(&self, target: &SpiffeId) -> Result<SocketAddr, Report<Error>>;
 }

@@ -9,18 +9,21 @@ pub mod endpoint;
 pub mod resolver;
 pub mod udp_resolver;
 
-mod insecure_server_verifier;
-
 pub use endpoint::{QuicAcceptor, QuicConnector, QuicHandle, QuicPublisher};
 pub use udp_resolver::UdpResolver;
 
+use crate::core::identity::{SpiffeId, X509Bundle};
 use crate::utils::report::ErrorReport;
 
 #[derive(Debug, Clone)]
 pub struct EndpointAddr(pub SocketAddr);
 
 #[derive(Debug, Clone)]
-pub struct AddrMap(pub HashMap<String, SocketAddr>);
+pub struct AddrMap(pub HashMap<SpiffeId, SocketAddr>);
+
+/// The rete trust bundle (CA authorities) the transport validates peers against.
+#[derive(Clone)]
+pub struct TrustBundle(pub Arc<X509Bundle>);
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -34,8 +37,10 @@ pub struct Error(String);
 pub struct TransportDeps {
     /// Local UDP socket address to bind for ingress and egress transport.
     endpoint_addr: EndpointAddr,
-    /// Mapping of logical node names to reachable endpoint addresses.
+    /// Mapping of target identities to their reachable endpoint addresses.
     addr_map: AddrMap,
+    /// Rete trust bundle used by the mTLS verifiers.
+    trust_bundle: TrustBundle,
 }
 
 /// Fundle DI container for the transport layer.
@@ -56,8 +61,11 @@ impl TransportBundle {
         let socket = std::net::UdpSocket::bind(deps.endpoint_addr.0).change_context(Error(
             format!("Failed to bind UDP socket to {}", deps.endpoint_addr.0),
         ))?;
-        let (connector, publisher, handle) =
-            endpoint::actor::QuicEndpointActor::spawn_new(resolver.clone(), socket)?;
+        let (connector, publisher, handle) = endpoint::actor::QuicEndpointActor::spawn_new(
+            resolver.clone(),
+            socket,
+            deps.trust_bundle.0,
+        )?;
 
         Ok(Self {
             endpoint_connector: connector,

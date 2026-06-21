@@ -24,10 +24,6 @@
 //! [ADR-0006]: https://florete.tech/docs/implementation/adr/0006-impl-mtls-in-quic-endpoint
 //! [ADR-0007]: https://florete.tech/docs/implementation/adr/0007-decouple-naming-identity-routing
 
-// Not wired into the endpoint yet; the types are exercised by the
-// unit tests below in the meantime.
-#![allow(dead_code)]
-
 use std::fmt;
 use std::sync::Arc;
 
