@@ -14,9 +14,12 @@ env_logger = "0.11"
 error-stack = "0.7"
 fast-socks5 = "1.0"
 fundle = "0.3"
+glob = "0.3"
 husky-rs = "0.3"
 log = { version = "0.4", features = ["std"] }
 mockall_double = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 

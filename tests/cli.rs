@@ -4,9 +4,9 @@
 //! Cross-binary mint-flow integration test.
 //!
 //! Exercises the plumbing surface end-to-end:
-//!   1. `florctl ca init` produces ca.crt + ca.key.
+//!   1. `retectl ca init` produces ca.crt + ca.key.
 //!   2. `flor id keygen` produces alice.key + alice.csr.
-//!   3. `florctl ca sign` consumes the CSR and emits alice.crt.
+//!   3. `retectl ca sign` consumes the CSR and emits alice.crt.
 //!   4. The crate verifies alice.crt was issued by the CA and carries the
 //!      expected SPIFFE ID.
 
@@ -19,8 +19,8 @@ fn flor() -> Command {
     Command::cargo_bin("flor").unwrap()
 }
 
-fn florctl() -> Command {
-    Command::cargo_bin("florctl").unwrap()
+fn retectl() -> Command {
+    Command::cargo_bin("retectl").unwrap()
 }
 
 fn p(dir: &tempfile::TempDir, name: &str) -> PathBuf {
@@ -36,7 +36,7 @@ fn end_to_end_mint_flow_user_principal() {
     let alice_csr = p(&dir, "alice.csr");
     let alice_cert = p(&dir, "alice.crt");
 
-    florctl()
+    retectl()
         .args(["ca", "init", "--trust-domain", "demo.flor", "--out-cert"])
         .arg(&ca_cert)
         .arg("--out-key")
@@ -62,7 +62,7 @@ fn end_to_end_mint_flow_user_principal() {
         .assert()
         .success();
 
-    florctl()
+    retectl()
         .args(["ca", "sign", "--kind", "user", "--name", "alice", "--csr"])
         .arg(&alice_csr)
         .arg("--ca-cert")
@@ -97,7 +97,7 @@ fn end_to_end_mint_flow_node_scoped_service() {
     let csr = p(&dir, "db.csr");
     let cert = p(&dir, "db.crt");
 
-    florctl()
+    retectl()
         .args(["ca", "init", "--trust-domain", "demo.flor", "--out-cert"])
         .arg(&ca_cert)
         .arg("--out-key")
@@ -125,7 +125,7 @@ fn end_to_end_mint_flow_node_scoped_service() {
         .assert()
         .success();
 
-    florctl()
+    retectl()
         .args([
             "ca", "sign", "--kind", "service", "--name", "db", "--scope", "alpha", "--csr",
         ])
@@ -161,7 +161,7 @@ fn ca_init_writes_key_with_mode_0600() {
         let ca_cert = p(&dir, "ca.crt");
         let ca_key = p(&dir, "ca.key");
 
-        florctl()
+        retectl()
             .args(["ca", "init", "--trust-domain", "demo.flor", "--out-cert"])
             .arg(&ca_cert)
             .arg("--out-key")
@@ -185,7 +185,7 @@ fn ca_sign_rejects_kind_mismatch() {
     let csr = p(&dir, "alice.csr");
     let cert = p(&dir, "out.crt");
 
-    florctl()
+    retectl()
         .args(["ca", "init", "--trust-domain", "demo.flor", "--out-cert"])
         .arg(&ca_cert)
         .arg("--out-key")
@@ -211,7 +211,7 @@ fn ca_sign_rejects_kind_mismatch() {
         .assert()
         .success();
 
-    florctl()
+    retectl()
         .args(["ca", "sign", "--kind", "node", "--name", "alpha", "--csr"])
         .arg(&csr)
         .arg("--ca-cert")

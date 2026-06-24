@@ -1,7 +1,7 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-//! Shared CLI helpers used by both `flor` and `florctl` binaries.
+//! Shared CLI helpers used by both `flor` and `retectl` binaries.
 
 use std::fmt;
 use std::fs::OpenOptions;
@@ -59,6 +59,17 @@ impl<E> fmt::Display for CompactChain<'_, E> {
         }
         Ok(())
     }
+}
+
+/// Print a load error to stderr (clean readable message) and to the log (full chain).
+///
+/// Use this for operational failures during config loading — missing files, I/O errors,
+/// parse failures — where the full error-stack debug output is developer-relevant but
+/// not useful to the operator reading the terminal.
+pub fn print_load_error<E: std::error::Error>(report: &Report<E>) {
+    log::error!("{report:?}");
+    let style = error_prefix_style();
+    eprintln!("{style}error:{style:#} {}", CompactChain(report));
 }
 
 /// Write a file holding private key material.

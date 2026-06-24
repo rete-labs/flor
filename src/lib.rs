@@ -2,6 +2,7 @@
 // Licensed under Apache-2.0 or MIT at your option.
 
 pub mod cli;
+pub mod config;
 pub mod core;
 pub mod logging;
 pub mod northbound;
