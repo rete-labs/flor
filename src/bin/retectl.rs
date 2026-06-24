@@ -1,7 +1,7 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-//! `florctl` — operator-only rete-authoring CLI.
+//! `retectl` — operator-only rete-authoring CLI.
 //!
 //! The CA private key is only ever touched by this binary; it never ships to a node.
 
@@ -12,7 +12,8 @@ use clap::{Args, Parser, Subcommand};
 use error_stack::{Report, ResultExt};
 
 use flor::{
-    cli::{print_error, write_secret},
+    cli::{print_error, print_load_error, write_secret},
+    config::rete::{LoadOpts, load, validate},
     core::identity::{Ca, Kind, TrustDomain, build_id},
 };
 
@@ -21,9 +22,9 @@ use flor::{
 struct Error(String);
 
 #[derive(Parser, Debug)]
-#[command(name = "florctl", about = "Florete operator CLI (rete authoring)")]
+#[command(name = "retectl", about = "Florete operator CLI (rete authoring)")]
 struct Cli {
-    /// Show the full error-stack chain on failure (default: compact `: `-joined chain).
+    /// Enable debug logging (also prints full error chains on failure).
     #[arg(short, long, global = true)]
     verbose: bool,
 
@@ -38,6 +39,19 @@ enum Cmd {
         #[command(subcommand)]
         action: CaAction,
     },
+    /// Validate rete config: schema, cross-references, access consistency.
+    Validate(ValidateArgs),
+}
+
+#[derive(Args, Debug)]
+struct ValidateArgs {
+    /// Repository root directory.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+
+    /// Override file discovery with explicit paths or globs (repeatable).
+    #[arg(short, long = "file", value_name = "FILE")]
+    files: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -97,6 +111,14 @@ struct CaSignArgs {
 
 fn main() {
     let cli = Cli::parse();
+
+    let log_level = if cli.verbose {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Warn
+    };
+    let _ = flor::logging::logger::init(log_level);
+
     if let Err(e) = run(cli.cmd) {
         print_error(&e, cli.verbose);
         std::process::exit(1);
@@ -109,7 +131,34 @@ fn run(cmd: Cmd) -> Result<(), Report<Error>> {
             CaAction::Init(args) => ca_init(args),
             CaAction::Sign(args) => ca_sign(args),
         },
+        Cmd::Validate(args) => cmd_validate(args),
     }
+}
+
+fn cmd_validate(args: ValidateArgs) -> Result<(), Report<Error>> {
+    let opts = LoadOpts {
+        repo: args.repo,
+        files: args.files,
+    };
+
+    let model = load(&opts).map_err(|e| {
+        print_load_error(&e);
+        Report::new(Error("config load failed".into()))
+    })?;
+
+    let violations = validate(&model);
+
+    if violations.is_empty() {
+        println!("ok");
+    } else {
+        for v in &violations {
+            eprintln!("  [{}] {}", v.rule, v.message);
+        }
+        eprintln!("error: {} violation(s) found", violations.len());
+        std::process::exit(1);
+    }
+
+    Ok(())
 }
 
 fn ca_init(args: CaInitArgs) -> Result<(), Report<Error>> {
