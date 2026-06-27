@@ -50,7 +50,7 @@ fn merge_entries<V>(
 
 /// Merge parsed config files into one `RepoModel`.
 ///
-/// `override_mode = true` when the `-f` flag was used; in that mode the
+/// `discovery_mode = false` when the `-f` flag was used; in that mode the
 /// `rete` block is still required in at least one selected file.
 pub fn merge(
     files: Vec<(PathBuf, ConfigFragment)>,
@@ -121,4 +121,222 @@ pub fn merge(
         roles,
         users,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::super::loader::LoadError;
+    use super::super::model::ConfigFragment;
+    use super::merge;
+
+    fn fragment(yaml: &str) -> (PathBuf, ConfigFragment) {
+        let f = serde_yaml_ng::from_str::<ConfigFragment>(yaml).expect("test YAML must be valid");
+        (PathBuf::from("test.yaml"), f)
+    }
+
+    fn named(name: &str, yaml: &str) -> (PathBuf, ConfigFragment) {
+        let f = serde_yaml_ng::from_str::<ConfigFragment>(yaml).expect("test YAML must be valid");
+        (PathBuf::from(name), f)
+    }
+
+    const RETE_BLOCK: &str = "\
+rete:
+  name: test-rete
+  ca:
+    cert: ca.pem
+  signers:
+    mgmt:
+      keys: []
+";
+
+    const NODE_A: &str = "\
+nodes:
+  node-a:
+    vertices:
+      - name: quic0
+        kind: link
+        type: quic
+        address: \"1.2.3.4:4433\"
+";
+
+    const NODE_B: &str = "\
+nodes:
+  node-b:
+    vertices:
+      - name: quic0
+        kind: link
+        type: quic
+        address: \"5.6.7.8:4433\"
+";
+
+    const SVC_A: &str = "\
+services:
+  svc-a:
+    at: node-a
+    addr: \"127.0.0.1:8080\"
+";
+
+    const SVC_B: &str = "\
+services:
+  svc-b:
+    at: node-b
+    addr: \"127.0.0.1:9090\"
+";
+
+    // -----------------------------------------------------------------------
+    // Success cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn single_file_with_rete_block_succeeds() {
+        let model = merge(vec![fragment(RETE_BLOCK)], true).unwrap();
+        assert_eq!(model.rete.name, "test-rete");
+    }
+
+    #[test]
+    fn multiple_files_merge_nodes_and_services() {
+        let files = vec![
+            fragment(RETE_BLOCK),
+            named("nodes.yaml", NODE_A),
+            named("nodes2.yaml", NODE_B),
+            named("svcs.yaml", SVC_A),
+            named("svcs2.yaml", SVC_B),
+        ];
+        let model = merge(files, true).unwrap();
+        assert!(model.nodes.contains_key("node-a"));
+        assert!(model.nodes.contains_key("node-b"));
+        assert!(model.services.contains_key("svc-a"));
+        assert!(model.services.contains_key("svc-b"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Duplicate rete block
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn duplicate_rete_block_returns_error() {
+        let files = vec![
+            named("rete.yaml", RETE_BLOCK),
+            named("other.yaml", RETE_BLOCK),
+        ];
+        let err = merge(files, true).unwrap_err();
+        let msg = err.current_context().to_string();
+        assert!(msg.contains("Duplicate `rete`"), "got: {msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Missing rete block
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn missing_rete_block_discovery_mode_returns_error() {
+        let err = merge(vec![fragment(NODE_A)], true).unwrap_err();
+        let LoadError::Merge(msg) = err.current_context() else {
+            panic!("expected Merge error");
+        };
+        assert!(msg.contains("rete.yaml"), "got: {msg}");
+    }
+
+    #[test]
+    fn missing_rete_block_override_mode_returns_error() {
+        let err = merge(vec![fragment(NODE_A)], false).unwrap_err();
+        let LoadError::Merge(msg) = err.current_context() else {
+            panic!("expected Merge error");
+        };
+        assert!(msg.contains("specified files"), "got: {msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Duplicate entry names across files
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn duplicate_node_name_across_files_returns_error() {
+        let files = vec![
+            named("file1.yaml", &format!("{RETE_BLOCK}{NODE_A}")),
+            named("file2.yaml", NODE_A),
+        ];
+        let err = merge(files, true).unwrap_err();
+        let LoadError::Merge(msg) = err.current_context() else {
+            panic!("expected Merge error");
+        };
+        assert!(msg.contains("Duplicate node 'node-a'"), "got: {msg}");
+    }
+
+    #[test]
+    fn duplicate_service_name_across_files_returns_error() {
+        let files = vec![
+            named("file1.yaml", &format!("{RETE_BLOCK}{SVC_A}")),
+            named("file2.yaml", SVC_A),
+        ];
+        let err = merge(files, true).unwrap_err();
+        let LoadError::Merge(msg) = err.current_context() else {
+            panic!("expected Merge error");
+        };
+        assert!(msg.contains("Duplicate service 'svc-a'"), "got: {msg}");
+    }
+
+    #[test]
+    fn duplicate_role_name_across_files_returns_error() {
+        let role_yaml = "roles:\n  admin:\n    allow: []\n";
+        let files = vec![
+            named("file1.yaml", &format!("{RETE_BLOCK}{role_yaml}")),
+            named("file2.yaml", role_yaml),
+        ];
+        let err = merge(files, true).unwrap_err();
+        let LoadError::Merge(msg) = err.current_context() else {
+            panic!("expected Merge error");
+        };
+        assert!(msg.contains("Duplicate role 'admin'"), "got: {msg}");
+    }
+
+    #[test]
+    fn duplicate_user_name_across_files_returns_error() {
+        let user_yaml = "users:\n  alice:\n    roles: []\n";
+        let files = vec![
+            named("file1.yaml", &format!("{RETE_BLOCK}{user_yaml}")),
+            named("file2.yaml", user_yaml),
+        ];
+        let err = merge(files, true).unwrap_err();
+        let LoadError::Merge(msg) = err.current_context() else {
+            panic!("expected Merge error");
+        };
+        assert!(msg.contains("Duplicate user 'alice'"), "got: {msg}");
+    }
+
+    #[test]
+    fn duplicate_group_name_across_files_returns_error() {
+        let group_yaml = "groups:\n  my-group:\n";
+        let files = vec![
+            named("file1.yaml", &format!("{RETE_BLOCK}{group_yaml}")),
+            named("file2.yaml", group_yaml),
+        ];
+        let err = merge(files, true).unwrap_err();
+        let LoadError::Merge(msg) = err.current_context() else {
+            panic!("expected Merge error");
+        };
+        assert!(msg.contains("Duplicate group 'my-group'"), "got: {msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // All errors are collected before returning
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multiple_merge_errors_all_collected() {
+        // Two files each redefine node-a AND svc-a → expect both errors in one report.
+        let combined = format!("{NODE_A}{SVC_A}");
+        let files = vec![
+            named("file1.yaml", &format!("{RETE_BLOCK}{combined}")),
+            named("file2.yaml", &combined),
+        ];
+        let err = merge(files, true).unwrap_err();
+        let LoadError::Merge(msg) = err.current_context() else {
+            panic!("expected Merge error");
+        };
+        assert!(msg.contains("node-a"), "got: {msg}");
+        assert!(msg.contains("svc-a"), "got: {msg}");
+    }
 }

@@ -366,11 +366,17 @@ fn check_operator_presence(model: &RepoModel, out: &mut Vec<Violation>) {
 // ---------------------------------------------------------------------------
 
 fn check_vertex_graph_reachability(model: &RepoModel, out: &mut Vec<Violation>) {
-    // Build the set of nodes that host at least one non-config-read workload service.
+    // Build the set of nodes that host at least one non-management workload service.
+    // Both config-read (config-server) and config-write (config-publisher) are management
+    // infrastructure; their node's address requirement is enforced by ManagementNodeIntegrity.
     let workload_nodes: std::collections::HashSet<&str> = model
         .services
         .values()
-        .filter(|svc| !svc.groups.iter().any(|g| g == GROUP_CONFIG_READ))
+        .filter(|svc| {
+            !svc.groups
+                .iter()
+                .any(|g| g == GROUP_CONFIG_READ || g == GROUP_CONFIG_WRITE)
+        })
         .map(|svc| svc.at.as_str())
         .collect();
 
@@ -520,5 +526,857 @@ fn check_principal_role_coherence(model: &RepoModel, out: &mut Vec<Violation>) {
                 ),
             });
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use super::super::merge::RepoModel;
+    use super::super::model::{
+        Ca, Group, MgmtSigners, Node, Rete, Role, Service, Signers, User, UserNode, Vertex,
+        VertexKind, VertexType,
+    };
+    use super::{Rule, Violation, validate};
+
+    fn make_rete() -> Rete {
+        Rete {
+            name: "test-rete".into(),
+            ca: Ca {
+                cert: PathBuf::from("ca.pem"),
+                validity_days: None,
+            },
+            signers: Signers {
+                mgmt: MgmtSigners {
+                    validity_days: None,
+                    keys: vec![],
+                },
+            },
+            tls_principals: None,
+        }
+    }
+
+    fn quic_link_vertex(name: &str, address: Option<&str>) -> Vertex {
+        Vertex {
+            name: name.into(),
+            kind: VertexKind::Link,
+            vertex_type: VertexType::Quic,
+            address: address.map(String::from),
+        }
+    }
+
+    fn node_with_quic_link(vertex_name: &str, address: Option<&str>) -> Node {
+        Node {
+            vertices: vec![quic_link_vertex(vertex_name, address)],
+        }
+    }
+
+    fn mgmt_service(node: &str, groups: Vec<&str>) -> Service {
+        Service {
+            at: node.into(),
+            via: None,
+            addr: "127.0.0.1:9000".into(),
+            socks5_proxy: None,
+            groups: groups.into_iter().map(String::from).collect(),
+            roles: vec![],
+            scope: None,
+        }
+    }
+
+    fn minimal_valid_model() -> RepoModel {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "mgmt".into(),
+            node_with_quic_link("quic0", Some("1.2.3.4:4433")),
+        );
+
+        let mut services = HashMap::new();
+        services.insert(
+            "config-server".into(),
+            mgmt_service("mgmt", vec!["config-read"]),
+        );
+        services.insert(
+            "config-publisher".into(),
+            mgmt_service("mgmt", vec!["config-write"]),
+        );
+
+        let mut groups: HashMap<String, Option<Group>> = HashMap::new();
+        groups.insert("config-read".into(), None);
+        groups.insert("config-write".into(), None);
+
+        let mut roles = HashMap::new();
+        roles.insert(
+            "node".into(),
+            Role {
+                allow: vec!["config-read".into()],
+            },
+        );
+        roles.insert(
+            "operator".into(),
+            Role {
+                allow: vec!["config-write".into()],
+            },
+        );
+
+        let mut users = HashMap::new();
+        users.insert(
+            "alice".into(),
+            User {
+                roles: vec!["operator".into()],
+                nodes: vec![],
+            },
+        );
+
+        RepoModel {
+            rete: make_rete(),
+            nodes,
+            services,
+            groups,
+            roles,
+            users,
+        }
+    }
+
+    fn count(violations: &[Violation], rule: Rule) -> usize {
+        violations.iter().filter(|v| v.rule == rule).count()
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn valid_model_has_no_violations() {
+        let model = minimal_valid_model();
+        let violations = validate(&model);
+        assert!(
+            violations.is_empty(),
+            "expected no violations, got: {:?}",
+            violations.iter().map(|v| &v.message).collect::<Vec<_>>()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule::CrossReferences
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cross_references_role_allow_undefined_group() {
+        let mut model = minimal_valid_model();
+        model.roles.insert(
+            "bad-role".into(),
+            Role {
+                allow: vec!["nonexistent-group".into()],
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::CrossReferences), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::CrossReferences)
+                .unwrap()
+                .message
+                .contains("nonexistent-group")
+        );
+    }
+
+    #[test]
+    fn cross_references_user_undefined_role() {
+        let mut model = minimal_valid_model();
+        model.users.insert(
+            "bob".into(),
+            User {
+                roles: vec!["ghost-role".into()],
+                nodes: vec![],
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::CrossReferences), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::CrossReferences)
+                .unwrap()
+                .message
+                .contains("ghost-role")
+        );
+    }
+
+    #[test]
+    fn cross_references_user_undefined_node() {
+        let mut model = minimal_valid_model();
+        model.users.insert(
+            "bob".into(),
+            User {
+                roles: vec![],
+                nodes: vec![UserNode {
+                    at: "ghost-node".into(),
+                    via: None,
+                }],
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::CrossReferences), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::CrossReferences)
+                .unwrap()
+                .message
+                .contains("ghost-node")
+        );
+    }
+
+    #[test]
+    fn cross_references_service_undefined_group() {
+        let mut model = minimal_valid_model();
+        model.services.insert(
+            "my-svc".into(),
+            Service {
+                at: "mgmt".into(),
+                via: None,
+                addr: "127.0.0.1:8080".into(),
+                socks5_proxy: None,
+                groups: vec!["ghost-group".into()],
+                roles: vec![],
+                scope: None,
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::CrossReferences), 1);
+        assert!(violations[0].message.contains("ghost-group"));
+    }
+
+    #[test]
+    fn cross_references_service_undefined_role() {
+        let mut model = minimal_valid_model();
+        model.services.insert(
+            "my-svc".into(),
+            Service {
+                at: "mgmt".into(),
+                via: None,
+                addr: "127.0.0.1:8080".into(),
+                socks5_proxy: None,
+                groups: vec![],
+                roles: vec!["ghost-role".into()],
+                scope: None,
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::CrossReferences), 1);
+        assert!(violations[0].message.contains("ghost-role"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule::PrincipalRegistry
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn principal_registry_user_service_name_collision() {
+        let mut model = minimal_valid_model();
+        model.services.insert(
+            "alice".into(),
+            Service {
+                at: "mgmt".into(),
+                via: None,
+                addr: "127.0.0.1:8080".into(),
+                socks5_proxy: None,
+                groups: vec![],
+                roles: vec![],
+                scope: None,
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::PrincipalRegistry), 1);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == Rule::PrincipalRegistry && v.message.contains("alice"))
+        );
+    }
+
+    #[test]
+    fn principal_registry_user_node_name_collision() {
+        let mut model = minimal_valid_model();
+        model.nodes.insert(
+            "alice".into(),
+            node_with_quic_link("quic0", Some("1.2.3.4:4433")),
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::PrincipalRegistry), 1);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == Rule::PrincipalRegistry && v.message.contains("alice"))
+        );
+    }
+
+    #[test]
+    fn principal_registry_service_node_name_collision() {
+        let mut model = minimal_valid_model();
+        model.nodes.insert(
+            "config-server".into(),
+            node_with_quic_link("quic0", Some("5.6.7.8:4433")),
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::PrincipalRegistry), 1);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == Rule::PrincipalRegistry && v.message.contains("config-server"))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule::ServicePlacement
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn service_placement_undefined_node() {
+        let mut model = minimal_valid_model();
+        model.services.insert(
+            "orphan-svc".into(),
+            Service {
+                at: "nonexistent-node".into(),
+                via: None,
+                addr: "127.0.0.1:8080".into(),
+                socks5_proxy: None,
+                groups: vec![],
+                roles: vec![],
+                scope: None,
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::ServicePlacement), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::ServicePlacement)
+                .unwrap()
+                .message
+                .contains("nonexistent-node")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule::ManagementNodeIntegrity
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn management_node_integrity_missing_config_server() {
+        let mut model = minimal_valid_model();
+        model.services.remove("config-server");
+        let violations = validate(&model);
+        assert!(count(&violations, Rule::ManagementNodeIntegrity) >= 1);
+        assert!(violations.iter().any(
+            |v| v.rule == Rule::ManagementNodeIntegrity && v.message.contains("config-server")
+        ));
+    }
+
+    #[test]
+    fn management_node_integrity_missing_config_publisher() {
+        let mut model = minimal_valid_model();
+        model.services.remove("config-publisher");
+        let violations = validate(&model);
+        assert!(count(&violations, Rule::ManagementNodeIntegrity) >= 1);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == Rule::ManagementNodeIntegrity
+                    && v.message.contains("config-publisher"))
+        );
+    }
+
+    #[test]
+    fn management_node_integrity_server_not_in_config_read_group() {
+        let mut model = minimal_valid_model();
+        model
+            .services
+            .insert("config-server".into(), mgmt_service("mgmt", vec![]));
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::ManagementNodeIntegrity), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::ManagementNodeIntegrity)
+                .unwrap()
+                .message
+                .contains("config-read")
+        );
+    }
+
+    #[test]
+    fn management_node_integrity_publisher_not_in_config_write_group() {
+        let mut model = minimal_valid_model();
+        model
+            .services
+            .insert("config-publisher".into(), mgmt_service("mgmt", vec![]));
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::ManagementNodeIntegrity), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::ManagementNodeIntegrity)
+                .unwrap()
+                .message
+                .contains("config-write")
+        );
+    }
+
+    #[test]
+    fn management_node_integrity_server_and_publisher_on_different_nodes() {
+        let mut model = minimal_valid_model();
+        model.nodes.insert(
+            "other".into(),
+            node_with_quic_link("quic0", Some("9.9.9.9:4433")),
+        );
+        model.services.insert(
+            "config-publisher".into(),
+            mgmt_service("other", vec!["config-write"]),
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::ManagementNodeIntegrity), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::ManagementNodeIntegrity)
+                .unwrap()
+                .message
+                .contains("same management node")
+        );
+    }
+
+    #[test]
+    fn management_node_integrity_mgmt_node_no_public_quic_link() {
+        let mut model = minimal_valid_model();
+        model
+            .nodes
+            .insert("mgmt".into(), node_with_quic_link("quic0", None));
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::ManagementNodeIntegrity), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::ManagementNodeIntegrity)
+                .unwrap()
+                .message
+                .contains("public `address`")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule::ReservedNameProtection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reserved_name_protection_missing_node_role() {
+        let mut model = minimal_valid_model();
+        model.roles.remove("node");
+        let violations = validate(&model);
+        assert!(count(&violations, Rule::ReservedNameProtection) >= 1);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == Rule::ReservedNameProtection && v.message.contains("'node'"))
+        );
+    }
+
+    #[test]
+    fn reserved_name_protection_node_role_wrong_allow() {
+        let mut model = minimal_valid_model();
+        model.roles.insert(
+            "node".into(),
+            Role {
+                allow: vec!["config-write".into()],
+            },
+        );
+        let violations = validate(&model);
+        assert!(count(&violations, Rule::ReservedNameProtection) >= 1);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == Rule::ReservedNameProtection && v.message.contains("'node'"))
+        );
+    }
+
+    #[test]
+    fn reserved_name_protection_missing_operator_role() {
+        let mut model = minimal_valid_model();
+        model.roles.remove("operator");
+        let violations = validate(&model);
+        assert!(count(&violations, Rule::ReservedNameProtection) >= 1);
+        assert!(violations.iter().any(|v| v.rule == Rule::ReservedNameProtection
+            && v.message.contains("'operator'")));
+    }
+
+    #[test]
+    fn reserved_name_protection_operator_role_wrong_allow() {
+        let mut model = minimal_valid_model();
+        model.roles.insert(
+            "operator".into(),
+            Role {
+                allow: vec!["config-read".into()],
+            },
+        );
+        let violations = validate(&model);
+        assert!(count(&violations, Rule::ReservedNameProtection) >= 1);
+        assert!(violations.iter().any(|v| v.rule == Rule::ReservedNameProtection
+            && v.message.contains("'operator'")));
+    }
+
+    #[test]
+    fn reserved_name_protection_missing_config_read_group() {
+        let mut model = minimal_valid_model();
+        model.groups.remove("config-read");
+        let violations = validate(&model);
+        assert!(count(&violations, Rule::ReservedNameProtection) >= 1);
+        assert!(
+            violations.iter().any(
+                |v| v.rule == Rule::ReservedNameProtection && v.message.contains("config-read")
+            )
+        );
+    }
+
+    #[test]
+    fn reserved_name_protection_missing_config_write_group() {
+        let mut model = minimal_valid_model();
+        model.groups.remove("config-write");
+        let violations = validate(&model);
+        assert!(count(&violations, Rule::ReservedNameProtection) >= 1);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == Rule::ReservedNameProtection
+                    && v.message.contains("config-write"))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule::OperatorPresence
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn operator_presence_no_user_holds_operator_role() {
+        let mut model = minimal_valid_model();
+        model.users.insert(
+            "alice".into(),
+            User {
+                roles: vec![],
+                nodes: vec![],
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::OperatorPresence), 1);
+    }
+
+    #[test]
+    fn operator_presence_at_least_one_operator_passes() {
+        let model = minimal_valid_model();
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::OperatorPresence), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule::VertexGraphReachability
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn vertex_graph_reachability_node_with_no_link_vertex() {
+        let mut model = minimal_valid_model();
+        model.nodes.insert(
+            "no-link".into(),
+            Node {
+                vertices: vec![Vertex {
+                    name: "mesh0".into(),
+                    kind: VertexKind::Mesh,
+                    vertex_type: VertexType::Udp,
+                    address: None,
+                }],
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::VertexGraphReachability), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::VertexGraphReachability)
+                .unwrap()
+                .message
+                .contains("no link-vertex")
+        );
+    }
+
+    #[test]
+    fn vertex_graph_reachability_node_with_no_quic_link_vertex() {
+        let mut model = minimal_valid_model();
+        model.nodes.insert(
+            "udp-only".into(),
+            Node {
+                vertices: vec![Vertex {
+                    name: "link0".into(),
+                    kind: VertexKind::Link,
+                    vertex_type: VertexType::Udp,
+                    address: Some("1.2.3.4:5000".into()),
+                }],
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::VertexGraphReachability), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::VertexGraphReachability)
+                .unwrap()
+                .message
+                .contains("type quic")
+        );
+    }
+
+    #[test]
+    fn vertex_graph_reachability_multiple_quic_link_vertices() {
+        let mut model = minimal_valid_model();
+        model.nodes.insert(
+            "dual-quic".into(),
+            Node {
+                vertices: vec![
+                    quic_link_vertex("quic0", Some("1.2.3.4:4433")),
+                    quic_link_vertex("quic1", Some("5.6.7.8:4433")),
+                ],
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::VertexGraphReachability), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::VertexGraphReachability)
+                .unwrap()
+                .message
+                .contains("exactly one")
+        );
+    }
+
+    #[test]
+    fn vertex_graph_reachability_workload_node_no_public_address() {
+        let mut model = minimal_valid_model();
+        model
+            .nodes
+            .insert("worker".into(), node_with_quic_link("quic0", None));
+        // Service with no management groups → worker is a workload node
+        model.services.insert(
+            "my-app".into(),
+            Service {
+                at: "worker".into(),
+                via: None,
+                addr: "127.0.0.1:8080".into(),
+                socks5_proxy: None,
+                groups: vec![],
+                roles: vec![],
+                scope: None,
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::VertexGraphReachability), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::VertexGraphReachability)
+                .unwrap()
+                .message
+                .contains("no public `address`")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule::WorkloadVertexBinding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn workload_vertex_binding_service_via_undefined_vertex() {
+        let mut model = minimal_valid_model();
+        model.services.insert(
+            "my-svc".into(),
+            Service {
+                at: "mgmt".into(),
+                via: Some("ghost-vertex".into()),
+                addr: "127.0.0.1:8080".into(),
+                socks5_proxy: None,
+                groups: vec![],
+                roles: vec![],
+                scope: None,
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::WorkloadVertexBinding), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::WorkloadVertexBinding)
+                .unwrap()
+                .message
+                .contains("ghost-vertex")
+        );
+    }
+
+    #[test]
+    fn workload_vertex_binding_service_multi_vertex_node_without_via() {
+        let mut model = minimal_valid_model();
+        model.nodes.insert(
+            "multi".into(),
+            Node {
+                vertices: vec![
+                    quic_link_vertex("quic0", Some("1.2.3.4:4433")),
+                    Vertex {
+                        name: "mesh0".into(),
+                        kind: VertexKind::Mesh,
+                        vertex_type: VertexType::Udp,
+                        address: None,
+                    },
+                ],
+            },
+        );
+        model.services.insert(
+            "my-svc".into(),
+            Service {
+                at: "multi".into(),
+                via: None,
+                addr: "127.0.0.1:8080".into(),
+                socks5_proxy: None,
+                groups: vec![],
+                roles: vec![],
+                scope: None,
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::WorkloadVertexBinding), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::WorkloadVertexBinding)
+                .unwrap()
+                .message
+                .contains("via:")
+        );
+    }
+
+    #[test]
+    fn workload_vertex_binding_user_via_undefined_vertex() {
+        let mut model = minimal_valid_model();
+        model.users.insert(
+            "bob".into(),
+            User {
+                roles: vec![],
+                nodes: vec![UserNode {
+                    at: "mgmt".into(),
+                    via: Some("ghost-vertex".into()),
+                }],
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::WorkloadVertexBinding), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::WorkloadVertexBinding)
+                .unwrap()
+                .message
+                .contains("ghost-vertex")
+        );
+    }
+
+    #[test]
+    fn workload_vertex_binding_user_multi_vertex_node_without_via() {
+        let mut model = minimal_valid_model();
+        model.nodes.insert(
+            "multi".into(),
+            Node {
+                vertices: vec![
+                    quic_link_vertex("quic0", Some("1.2.3.4:4433")),
+                    Vertex {
+                        name: "mesh0".into(),
+                        kind: VertexKind::Mesh,
+                        vertex_type: VertexType::Udp,
+                        address: None,
+                    },
+                ],
+            },
+        );
+        model.users.insert(
+            "bob".into(),
+            User {
+                roles: vec![],
+                nodes: vec![UserNode {
+                    at: "multi".into(),
+                    via: None,
+                }],
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::WorkloadVertexBinding), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::WorkloadVertexBinding)
+                .unwrap()
+                .message
+                .contains("via:")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule::PrincipalRoleCoherence
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn principal_role_coherence_socks5_proxy_without_roles() {
+        let mut model = minimal_valid_model();
+        model.services.insert(
+            "client-svc".into(),
+            Service {
+                at: "mgmt".into(),
+                via: None,
+                addr: "127.0.0.1:8080".into(),
+                socks5_proxy: Some("127.0.0.1:1080".into()),
+                groups: vec![],
+                roles: vec![],
+                scope: None,
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::PrincipalRoleCoherence), 1);
+        assert!(
+            violations
+                .iter()
+                .find(|v| v.rule == Rule::PrincipalRoleCoherence)
+                .unwrap()
+                .message
+                .contains("client-svc")
+        );
+    }
+
+    #[test]
+    fn principal_role_coherence_socks5_proxy_with_roles_passes() {
+        let mut model = minimal_valid_model();
+        model.services.insert(
+            "client-svc".into(),
+            Service {
+                at: "mgmt".into(),
+                via: None,
+                addr: "127.0.0.1:8080".into(),
+                socks5_proxy: Some("127.0.0.1:1080".into()),
+                groups: vec![],
+                roles: vec!["node".into()],
+                scope: None,
+            },
+        );
+        let violations = validate(&model);
+        assert_eq!(count(&violations, Rule::PrincipalRoleCoherence), 0);
     }
 }
