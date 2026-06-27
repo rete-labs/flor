@@ -150,15 +150,16 @@ fn cmd_validate(args: ValidateArgs) -> Result<(), Report<Error>> {
 
     if violations.is_empty() {
         println!("ok");
-    } else {
-        for v in &violations {
-            eprintln!("  [{}] {}", v.rule, v.message);
-        }
-        eprintln!("error: {} violation(s) found", violations.len());
-        std::process::exit(1);
+        return Ok(());
     }
 
-    Ok(())
+    for v in &violations {
+        eprintln!("  [{}] {}", v.rule, v.message);
+    }
+    Err(Report::new(Error(format!(
+        "{} violation(s) found",
+        violations.len()
+    ))))
 }
 
 fn ca_init(args: CaInitArgs) -> Result<(), Report<Error>> {

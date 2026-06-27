@@ -15,6 +15,48 @@ use std::path::PathBuf;
 use assert_cmd::Command;
 use flor::core::identity::{Ca, SpiffeId};
 
+const MINIMAL_VALID_CONFIG: &str = r#"
+rete:
+  name: test-rete
+  ca:
+    cert: ca.pem
+  signers:
+    mgmt:
+      keys: []
+
+nodes:
+  mgmt:
+    vertices:
+      - name: quic0
+        kind: link
+        type: quic
+        address: "1.2.3.4:4433"
+
+services:
+  config-server:
+    at: mgmt
+    addr: "127.0.0.1:9000"
+    groups: [config-read]
+  config-publisher:
+    at: mgmt
+    addr: "127.0.0.1:9001"
+    groups: [config-write]
+
+groups:
+  config-read:
+  config-write:
+
+roles:
+  node:
+    allow: [config-read]
+  operator:
+    allow: [config-write]
+
+users:
+  alice:
+    roles: [operator]
+"#;
+
 fn flor() -> Command {
     Command::cargo_bin("flor").unwrap()
 }
@@ -222,6 +264,83 @@ fn ca_sign_rejects_kind_mismatch() {
         .arg(&cert)
         .assert()
         .failure();
+}
+
+#[test]
+fn validate_exits_zero_and_prints_ok_on_valid_config() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("rete.yaml"), MINIMAL_VALID_CONFIG).unwrap();
+
+    retectl()
+        .args(["validate", "--repo"])
+        .arg(dir.path())
+        .assert()
+        .success()
+        .stdout("ok\n");
+}
+
+#[test]
+fn validate_exits_nonzero_and_reports_violation_on_invalid_config() {
+    let dir = tempfile::tempdir().unwrap();
+    // Missing config-server → ManagementNodeIntegrity violation
+    std::fs::write(
+        dir.path().join("rete.yaml"),
+        r#"
+rete:
+  name: test-rete
+  ca:
+    cert: ca.pem
+  signers:
+    mgmt:
+      keys: []
+
+nodes:
+  mgmt:
+    vertices:
+      - name: quic0
+        kind: link
+        type: quic
+        address: "1.2.3.4:4433"
+
+services:
+  config-publisher:
+    at: mgmt
+    addr: "127.0.0.1:9001"
+    groups: [config-write]
+
+groups:
+  config-read:
+  config-write:
+
+roles:
+  node:
+    allow: [config-read]
+  operator:
+    allow: [config-write]
+
+users:
+  alice:
+    roles: [operator]
+"#,
+    )
+    .unwrap();
+
+    let output = retectl()
+        .args(["validate", "--repo"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "expected non-zero exit");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("management-node integrity"),
+        "expected violation in stderr, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("violation(s) found"),
+        "expected summary in stderr, got: {stderr}"
+    );
 }
 
 #[test]
