@@ -12,6 +12,18 @@
 !.gitignore
 !.husky
 !.github
+!.agents/
+.agents/*
+!.agents/florete/
+!.agents/florete/**
+!.codex/
+.codex/*
+!.codex/skills/
+!.codex/skills/**
+!.claude/
+.claude/*
+!.claude/skills/
+!.claude/skills/**
 
 # all editor backup files
 *~
