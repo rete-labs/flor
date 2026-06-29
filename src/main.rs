@@ -1,29 +1,17 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use error_stack::{Report, ResultExt};
 
 use flor::{
-    AppConfigBundle,
     cli::{print_error, write_secret},
-    core::{
-        identity::{
-            Kind, NodeScopableKind, TrustDomain, X509Bundle, X509Svid, build_id, build_id_on_node,
-            keygen_csr, load_bundle_from_pem, load_svid_from_pem,
-        },
-        transport::{
-            AddrMap, EndpointAddr, QuicConnector, QuicPublisher, TransportBundle, TrustBundle,
-        },
-    },
+    core::identity::{Kind, TrustDomain, build_id, keygen_csr},
     logging,
-    northbound::{
-        inbound::{Error as InboundError, InboundBundle, Socks5Bindings},
-        outbound::{Error as OutboundError, OutboundBundle, TcpDirectBindings},
-    },
-    utils::report::ErrorReport,
+    utils::home::rete_root,
+    vertex,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -48,11 +36,10 @@ enum Cmd {
         #[command(subcommand)]
         action: IdAction,
     },
-    /// Run the demo (legacy, replaced by `agent run` once the daemon lands).
-    Demo {
-        /// Select node config.
-        #[arg(long, default_value = "alpha", value_parser = ["alpha", "beta"])]
-        name: String,
+    /// Run a vertex from its compiled artifact.
+    Vertex {
+        #[command(subcommand)]
+        action: VertexAction,
     },
 }
 
@@ -84,14 +71,22 @@ struct KeygenArgs {
     out_csr: PathBuf,
 }
 
-#[fundle::bundle]
-struct AppBundle {
-    #[forward(EndpointAddr, AddrMap, TrustBundle, Socks5Bindings, TcpDirectBindings)]
-    pub config: AppConfigBundle,
-    #[forward(QuicConnector, QuicPublisher)]
-    pub transport: TransportBundle,
-    pub inbound: InboundBundle,
-    pub outbound: OutboundBundle,
+#[derive(Subcommand, Debug)]
+enum VertexAction {
+    /// Run a link vertex against its rete root.
+    Run(VertexRunArgs),
+}
+
+#[derive(ClapArgs, Debug)]
+struct VertexRunArgs {
+    /// Rete scope: a subdirectory of `<flor-home>/retes/`, where flor-home is
+    /// `$FLOR_HOME` if set, else `$HOME/.flor`. Auto-detected when exactly one
+    /// rete is enrolled.
+    #[arg(long)]
+    rete: Option<String>,
+    /// Vertex name — selects `mgmt/vertices/<name>.json` under the rete root.
+    #[arg(long)]
+    name: String,
 }
 
 fn main() {
@@ -101,16 +96,18 @@ fn main() {
         Cmd::Id {
             action: IdAction::Keygen(keygen_args),
         } => {
-            // Synchronous path — no tokio needed
+            // Synchronous path — no tokio needed.
             if let Err(e) = run_id_keygen(keygen_args) {
                 print_error(&e, verbose);
                 std::process::exit(1);
             }
         }
-        Cmd::Demo { name } => {
+        Cmd::Vertex {
+            action: VertexAction::Run(vertex_args),
+        } => {
             logging::logger::init(log::LevelFilter::Info).expect("Failed to initialize logger");
-            if let Err(e) = run_demo(name) {
-                log::error!("Demo failed: {e:?}");
+            if let Err(e) = run_vertex(vertex_args) {
+                print_error(&e, verbose);
                 std::process::exit(1);
             }
         }
@@ -136,206 +133,26 @@ fn run_id_keygen(args: KeygenArgs) -> Result<(), Report<Error>> {
     Ok(())
 }
 
-fn run_demo(node_name: String) -> Result<(), Report<Error>> {
+fn run_vertex(args: VertexRunArgs) -> Result<(), Report<Error>> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .change_context(Error("Failed to build tokio runtime".into()))?;
-    rt.block_on(demo_main(node_name))
+    rt.block_on(vertex_main(args))
 }
 
-/// A list of SVIDs each paired with a local socket address — SOCKS5 caller
-/// principals with their listen addresses, or TCP-direct services with their
-/// upstream addresses.
-type SvidBindings = Vec<(X509Svid, SocketAddr)>;
-
-/// Demo trust domain — matches `scripts/dev-bootstrap.sh`.
-const DEMO_TRUST_DOMAIN: &str = "demo.flor";
-/// Directory the dev bootstrap mints CA + SVID material into.
-const DEV_DIR: &str = ".flor-dev";
-
-/// Read a file under `.flor-dev/`, with a hint to run the bootstrap if it's missing.
-fn read_dev_file(rel: &std::path::Path) -> Result<Vec<u8>, Report<Error>> {
-    let path = PathBuf::from(DEV_DIR).join(rel);
-    std::fs::read(&path).change_context_lazy(|| {
+async fn vertex_main(args: VertexRunArgs) -> Result<(), Report<Error>> {
+    let root = rete_root(args.rete.as_deref())
+        .change_context(Error("Failed to resolve the rete root".into()))?;
+    let config = vertex::ConfigBundle::load(&root, &args.name).change_context_lazy(|| {
         Error(format!(
-            "Failed to read {}; run scripts/dev-bootstrap.sh to mint dev material",
-            path.display()
+            "Failed to load vertex '{}' from {}",
+            args.name,
+            root.display()
         ))
-    })
-}
-
-/// Load a node's principal SVID from `.flor-dev/<node>/<name>.{crt,key}`.
-fn load_dev_svid(node: &str, name: &str) -> Result<X509Svid, Report<Error>> {
-    let cert = read_dev_file(&PathBuf::from(node).join(format!("{name}.crt")))?;
-    let key = read_dev_file(&PathBuf::from(node).join(format!("{name}.key")))?;
-    load_svid_from_pem(&cert, &key)
-        .change_context(Error(format!("Failed to load SVID for '{node}/{name}'")))
-}
-
-/// Load the rete trust bundle from `.flor-dev/ca.crt`.
-fn load_dev_bundle(td: &TrustDomain) -> Result<X509Bundle, Report<Error>> {
-    let ca = read_dev_file(std::path::Path::new("ca.crt"))?;
-    load_bundle_from_pem(td, &ca).change_context(Error("Failed to load trust bundle".into()))
-}
-
-/// A demo node's declarative config: where its QUIC endpoint binds, the SOCKS5
-/// principals it proxies for, and the TCP-direct services it serves.
-struct NodeConfig {
-    quic_addr: SocketAddr,
-    /// SOCKS5 caller principals: `(name, local listen address)`.
-    socks5: Vec<(&'static str, SocketAddr)>,
-    /// TCP-direct services: `(name, local upstream address)`.
-    services: Vec<(&'static str, SocketAddr)>,
-}
-
-fn sock(s: &str) -> SocketAddr {
-    s.parse().expect("valid socket address literal")
-}
-
-/// Demo topology that matches `scripts/dev-bootstrap.sh`, keyed by node name
-fn demo_topology() -> HashMap<&'static str, NodeConfig> {
-    HashMap::from([
-        (
-            "alpha",
-            NodeConfig {
-                quic_addr: sock("127.0.0.1:31337"),
-                socks5: vec![
-                    ("alice", sock("127.0.0.1:1080")),
-                    ("bob", sock("127.0.0.1:1081")),
-                ],
-                services: vec![],
-            },
-        ),
-        (
-            "beta",
-            NodeConfig {
-                quic_addr: sock("127.0.0.1:31440"),
-                socks5: vec![],
-                services: vec![("tcp-echo", sock("127.0.0.1:32450"))],
-            },
-        ),
-    ])
-}
-
-/// Load this node's own SVIDs for a set of `(name, local addr)` entries, pairing
-/// each loaded SVID with its address.
-fn load_node_svids(
-    node: &str,
-    entries: &[(&str, SocketAddr)],
-) -> Result<SvidBindings, Report<Error>> {
-    entries
-        .iter()
-        .map(|(name, addr)| Ok((load_dev_svid(node, name)?, *addr)))
-        .collect()
-}
-
-/// The SVIDs' SPIFFE IDs, comma-joined (the addresses are ignored).
-fn principals(bindings: &SvidBindings) -> String {
-    bindings
-        .iter()
-        .map(|(svid, _)| svid.spiffe_id().to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-async fn demo_main(node: String) -> Result<(), Report<Error>> {
-    let td = TrustDomain::new(DEMO_TRUST_DOMAIN)
-        .change_context(Error("Invalid demo trust domain".into()))?;
-
-    let topology = demo_topology();
-    let config = topology
-        .get(node.as_str())
-        .ok_or_else(|| Report::new(Error(format!("Unknown demo node '{node}'"))))?;
-
-    // Every service in the topology is a dialable target → its node's address.
-    let mut addr_map = HashMap::new();
-    for (host, cfg) in &topology {
-        for (svc, _upstream) in &cfg.services {
-            let id = build_id_on_node(&td, NodeScopableKind::Service, host, svc).change_context(
-                Error(format!("Failed to build identity for service '{svc}'")),
-            )?;
-            addr_map.insert(id, cfg.quic_addr);
-        }
-    }
-
-    let trust_bundle = Arc::new(load_dev_bundle(&td)?);
-
-    // Load this node's own principal/service SVIDs from its `.flor-dev/<node>/` dir.
-    let socks5_bindings = load_node_svids(&node, &config.socks5)?;
-    let tcp_direct_bindings = load_node_svids(&node, &config.services)?;
-
-    log::info!(
-        "Node '{node}' bound to {}. SOCKS5 principals: {}. TCP services: {}.",
-        config.quic_addr,
-        principals(&socks5_bindings),
-        principals(&tcp_direct_bindings),
-    );
-
-    let bundle_err = || Error("Failed to build app bundle".into());
-    let app: AppBundle = AppBundle::builder()
-        .config(|_| AppConfigBundle {
-            endpoint_addr: EndpointAddr(config.quic_addr),
-            addr_map: AddrMap(addr_map.clone()),
-            trust_bundle: TrustBundle(trust_bundle.clone()),
-            socks5_bindings: Socks5Bindings(socks5_bindings.clone()),
-            tcp_direct_bindings: TcpDirectBindings(tcp_direct_bindings.clone()),
-        })
-        .transport_try(|b| TransportBundle::try_new(b))
-        .change_context_lazy(bundle_err)?
-        .inbound_try_async(init_inbound)
+    })?;
+    log::info!("Running vertex '{}' from {}", args.name, root.display());
+    vertex::run(config)
         .await
-        .change_context_lazy(bundle_err)?
-        .outbound_try_async(init_outbound)
-        .await
-        .change_context_lazy(bundle_err)?
-        .build();
-
-    let endpoint_handle = app.transport.endpoint_handle;
-    let socks5_handle = app.inbound.socks5_handle;
-    let tcp_direct_handle = app.outbound.tcp_direct_handle;
-
-    tokio::select! {
-        result = endpoint_handle.wait() => {
-            if let Err(e) = result {
-                log::error!("Endpoint actor task failed: {e:?}");
-            }
-        }
-        result = async {
-            match socks5_handle {
-                Some(h) => h.wait().await,
-                None => std::future::pending().await,
-            }
-        } => {
-            if let Err(e) = result {
-                log::error!("Socks5 task failed: {e:?}");
-            }
-        }
-        result = async {
-            match tcp_direct_handle {
-                Some(h) => h.wait().await,
-                None => std::future::pending().await,
-            }
-        } => {
-            if let Err(e) = result {
-                log::error!("TCP direct outbound task failed: {e:?}");
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// Workaround to avoid rust-analyzer issue with async closures.
-async fn init_inbound(
-    b: &AppBundleBuilder<fundle::Read, fundle::Set, fundle::Set, fundle::NotSet, fundle::NotSet>,
-) -> Result<InboundBundle, ErrorReport<InboundError>> {
-    InboundBundle::try_new(b).await
-}
-
-// Workaround to avoid rust-analyzer issue with async closures.
-async fn init_outbound(
-    b: &AppBundleBuilder<fundle::Read, fundle::Set, fundle::Set, fundle::Set, fundle::NotSet>,
-) -> Result<OutboundBundle, ErrorReport<OutboundError>> {
-    OutboundBundle::try_new(b).await
+        .change_context_lazy(|| Error(format!("Vertex '{}' run failed", args.name)))
 }

@@ -51,40 +51,43 @@ fn validate_envelope<P: Payload>(
 ) -> Result<(), Report<Error>> {
     if env.schema_version != "1.0" {
         bail!(Error::new(format!(
-            "unsupported schema_version {:?}; expected \"1.0\"",
+            "Unsupported schema_version {:?}; expected \"1.0\"",
             env.schema_version
         )));
     }
     if env.plane.tag() != P::PLANE {
         bail!(Error::new(format!(
-            "artifact is on the {:?} plane, expected {:?}",
+            "Artifact is on the {:?} plane, expected {:?}",
             env.plane.tag(),
             P::PLANE
         )));
     }
     if env.kind != P::KIND {
         bail!(Error::new(format!(
-            "expected a {:?} artifact, got {:?}",
+            "Expected a {:?} artifact, got {:?}",
             P::KIND,
             env.kind
         )));
     }
     if env.name != expected_name {
         bail!(Error::new(format!(
-            "artifact names {:?}, expected {:?}",
+            "Artifact names {:?}, expected {:?}",
             env.name, expected_name
         )));
     }
     Ok(())
 }
 
-/// Checks shared by every vertex engine: each workload has io, and every link
-/// dials over a declared adapter of a matching type to a dialable peer.
+/// Checks shared by every vertex engine: all SPIFFE IDs share one trust domain,
+/// each workload has io, and every link dials over a declared adapter of a
+/// matching type to a dialable peer.
 fn validate_vertex_common(payload: &VertexMgmtPayload) -> Result<(), Report<Error>> {
+    validate_single_trust_domain(payload)?;
+
     for workload in &payload.workloads {
         if workload.io.is_empty() {
             bail!(Error::new(format!(
-                "workload {} has no io channels",
+                "Workload {} has no io channels",
                 workload.spiffe_id
             )));
         }
@@ -98,31 +101,77 @@ fn validate_vertex_common(payload: &VertexMgmtPayload) -> Result<(), Report<Erro
                 .find(|a| a.name() == member.via.adapter())
                 .ok_or_else(|| {
                     Report::new(Error::new(format!(
-                        "link {:?} dials over undeclared adapter {:?}",
+                        "Link {:?} dials over undeclared adapter {:?}",
                         member.name,
                         member.via.adapter()
                     )))
                 })?;
             if !via_matches_adapter(&member.via, adapter) {
                 bail!(Error::new(format!(
-                    "link {:?} via type does not match the type of adapter {:?}",
+                    "Link {:?} via type does not match the type of adapter {:?}",
                     member.name,
                     member.via.adapter()
                 )));
             }
             // The peer must be a dialable identity (a service or vertex).
             Dialable::new(member.peer.clone()).change_context_lazy(|| {
-                Error::new(format!("link {:?} peer is not dialable", member.name))
+                Error::new(format!("Link {:?} peer is not dialable", member.name))
             })?;
         }
     }
     Ok(())
 }
 
-/// Link-vertex rules: every egress target has a direct link to dial it (the
-/// degenerate 1-1 routing — a mesh vertex reaches targets via its ctrl
-/// forwarding table instead).
+/// Every SPIFFE ID across the payload (workloads, link peers, ACL targets and
+/// allow-lists) must belong to a single trust domain — the rete's. (Whether
+/// that domain is *our* rete's is checked elsewhere, against rete-root trust
+/// metadata; here it is internal consistency only.)
+fn validate_single_trust_domain(payload: &VertexMgmtPayload) -> Result<(), Report<Error>> {
+    let acl_ids = payload
+        .ingress
+        .iter()
+        .chain(&payload.egress)
+        .flat_map(|acl| std::iter::once(&acl.target).chain(&acl.allow));
+    let link_ids = payload
+        .links
+        .iter()
+        .flat_map(|LinkRule::Enum { members }| members.iter().map(|m| &m.peer));
+    let mut ids = payload
+        .workloads
+        .iter()
+        .map(|w| &w.spiffe_id)
+        .chain(link_ids)
+        .chain(acl_ids);
+
+    let Some(first) = ids.next() else {
+        return Ok(());
+    };
+    let td = first.trust_domain();
+    for id in ids {
+        if id.trust_domain() != td {
+            bail!(Error::new(format!(
+                "SPIFFE ID {id} is not in the rete trust domain {td}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Link-vertex rules: the connection manager is exactly one `udp` adapter, and
+/// every egress target has a direct link to dial it (the degenerate 1-1 routing
+/// — a mesh vertex reaches targets via its ctrl forwarding table instead).
 fn validate_vertex_link(payload: &VertexMgmtPayload) -> Result<(), Report<Error>> {
+    // A link vertex is one transport endpoint over one medium — by design, a
+    // single QUIC endpoint over a single udp socket. It never aggregates
+    // sockets (that is the mesh layer's job, via parallel link-vertices) and
+    // never terminates FlorIO (that is mesh-flor reaching down to link-flor).
+    match payload.connection_manager.adapters.as_slice() {
+        [Adapter::Udp { .. }] => {}
+        _ => bail!(Error::new(
+            "A link vertex must declare exactly one udp connection-manager adapter"
+        )),
+    }
+
     let link_peers: Vec<&SpiffeId> = payload
         .links
         .iter()
@@ -131,7 +180,7 @@ fn validate_vertex_link(payload: &VertexMgmtPayload) -> Result<(), Report<Error>
     for acl in &payload.egress {
         if !link_peers.iter().any(|peer| **peer == acl.target) {
             bail!(Error::new(format!(
-                "egress target {} has no link to dial it",
+                "Egress target {} has no link to dial it",
                 acl.target
             )));
         }
@@ -283,11 +332,58 @@ mod tests {
     // --- link-only rule ---
 
     #[test]
+    fn rejects_link_with_multiple_adapters() {
+        // A link vertex is one transport over one medium; two adapters is not a
+        // valid link artifact (socket aggregation is a mesh-layer concern).
+        let mut p = valid_payload();
+        p["connection_manager"]["adapters"] = json!([
+            { "name": "wire",  "type": "udp", "listen": "0.0.0.0:4433" },
+            { "name": "wire2", "type": "udp", "listen": "0.0.0.0:4434" }
+        ]);
+        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        assert!(format!("{err:?}").contains("exactly one udp"), "{err:?}");
+    }
+
+    #[test]
+    fn rejects_link_with_florio_adapter() {
+        // FlorIO is mesh-flor reaching down to link-flor; a link vertex never
+        // terminates it. Its link must dial over a udp adapter.
+        let mut p = valid_payload();
+        p["connection_manager"]["adapters"] = json!([
+            { "name": "io", "type": "florio", "socket": "/run/flor.sock" }
+        ]);
+        p["links"][0]["members"][0]["via"] = json!({ "type": "florio", "adapter": "io" });
+        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        assert!(format!("{err:?}").contains("exactly one udp"), "{err:?}");
+    }
+
+    #[test]
+    fn rejects_link_with_no_adapters() {
+        // A link vertex needs its one wire socket.
+        let mut p = valid_payload();
+        p["connection_manager"]["adapters"] = json!([]);
+        p["links"] = json!([]);
+        p["egress"] = json!([]);
+        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        assert!(format!("{err:?}").contains("exactly one udp"), "{err:?}");
+    }
+
+    #[test]
     fn rejects_egress_target_without_link() {
         let mut p = valid_payload();
         p["egress"][0]["target"] = json!("spiffe://demo.flor/service/unlinked");
         let err = parse(envelope_with(p)).validate("flor").unwrap_err();
-        assert!(format!("{err:?}").contains("egress target"), "{err:?}");
+        assert!(format!("{err:?}").contains("Egress target"), "{err:?}");
+    }
+
+    #[test]
+    fn rejects_mixed_trust_domains() {
+        // A link peer in a different trust domain than the workloads.
+        let mut p = valid_payload();
+        p["links"][0]["members"][0]["peer"] = json!("spiffe://other.flor/service/mongodb");
+        p["egress"][0]["target"] = json!("spiffe://other.flor/service/mongodb");
+        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        assert!(format!("{err:?}").contains("trust domain"), "{err:?}");
     }
 
     // --- mesh: shares the common rules, skips the link-only one ---
