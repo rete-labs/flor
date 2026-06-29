@@ -7,7 +7,9 @@
 # relays to a local TCP echo upstream. A byte round-trip proves the whole chain
 # (SOCKS5 → resolve → caller mTLS → server mTLS → publish/route → TCP relay).
 #
-# Topology matches src/main.rs + scripts/dev-bootstrap.sh:
+# Each node runs as `flor vertex run` against its own rete root under
+# .flor-dev/retes/<scope>/ (FLOR_HOME points the home dir there). Topology
+# matches scripts/dev-bootstrap.sh:
 #   - Alpha: SOCKS5 proxy for alice on 127.0.0.1:1080, QUIC on 127.0.0.1:31337
 #   - Beta:  serves service tcp-echo, QUIC on 127.0.0.1:31440, upstream :32450
 #
@@ -35,6 +37,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Print the tail of each node log (best-effort; logs exist only after startup).
+dump_node_logs() {
+  echo "--- alpha.log ---" >&2; tail -n 20 "$WORK/alpha.log" >&2 2>/dev/null || true
+  echo "--- beta.log ---"  >&2; tail -n 20 "$WORK/beta.log"  >&2 2>/dev/null || true
+}
+
 # Wait until a TCP port accepts connections (bash /dev/tcp), or time out.
 wait_for_port() {
   local host=$1 port=$2
@@ -53,11 +61,17 @@ echo "==> Building flor"
 cargo build -q --bin flor
 FLOR="$ROOT/target/debug/flor"
 
-if [[ ! -f "$ROOT/.flor-dev/ca.crt" ]]; then
-  echo "==> Minting dev material (.flor-dev/ is absent)"
-  bash "$ROOT/scripts/dev-bootstrap.sh" >"$WORK/bootstrap.log" 2>&1 \
-    || { cat "$WORK/bootstrap.log"; exit 1; }
-fi
+# Each node runs from its own rete root under .flor-dev/retes/<scope>/, located
+# by pointing the flor home dir there.
+export FLOR_HOME="$ROOT/.flor-dev"
+
+# Always re-mint, rather than reusing whatever is on disk: dev-bootstrap.sh is
+# re-runnable (it wipes and re-mints) and cheap next to the cargo build above.
+# A cached rete root from an older artifact schema would otherwise be fed to
+# `flor` and fail to parse — surfacing only as a confusing port-wait timeout.
+echo "==> Minting fresh dev material"
+bash "$ROOT/scripts/dev-bootstrap.sh" >"$WORK/bootstrap.log" 2>&1 \
+  || { cat "$WORK/bootstrap.log"; exit 1; }
 
 # TCP echo upstream that Beta's tcp-echo service forwards to.
 cat >"$WORK/echo.py" <<PY
@@ -104,13 +118,13 @@ if got != nonce:
 print(f"round-tripped {len(nonce)} bytes through mTLS relay")
 PY
 
-echo "==> Starting echo upstream + Beta + Alpha"
+echo "==> Starting echo upstream + Beta + Alpha (flor vertex run)"
 python3 "$WORK/echo.py" & PIDS+=($!)
-"$FLOR" demo --name beta  >"$WORK/beta.log"  2>&1 & PIDS+=($!)
-"$FLOR" demo --name alpha >"$WORK/alpha.log" 2>&1 & PIDS+=($!)
+"$FLOR" vertex run --rete beta  --name flor >"$WORK/beta.log"  2>&1 & PIDS+=($!)
+"$FLOR" vertex run --rete alpha --name flor >"$WORK/alpha.log" 2>&1 & PIDS+=($!)
 
-wait_for_port "${ECHO_ADDR%:*}" "${ECHO_ADDR#*:}"
-wait_for_port "${SOCKS5_ADDR%:*}" "${SOCKS5_ADDR#*:}"
+wait_for_port "${ECHO_ADDR%:*}" "${ECHO_ADDR#*:}" || { dump_node_logs; exit 1; }
+wait_for_port "${SOCKS5_ADDR%:*}" "${SOCKS5_ADDR#*:}" || { dump_node_logs; exit 1; }
 
 echo "==> Running SOCKS5 client through ${SOCKS5_ADDR} → ${TARGET_HOST}"
 if python3 "$WORK/client.py"; then
@@ -118,7 +132,6 @@ if python3 "$WORK/client.py"; then
 else
   status=$?
   echo "FAIL: e2e relay did not complete (exit $status)" >&2
-  echo "--- alpha.log ---" >&2; tail -n 20 "$WORK/alpha.log" >&2 || true
-  echo "--- beta.log ---" >&2;  tail -n 20 "$WORK/beta.log"  >&2 || true
+  dump_node_logs
   exit "$status"
 fi
