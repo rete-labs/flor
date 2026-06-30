@@ -19,7 +19,7 @@ use crate::{
 };
 
 use super::{
-    AcceptOutcome, QuicEndpoint, SvidTls,
+    AcceptOutcome, ConnectError, QuicEndpoint, SvidTls,
     connection::QuicConnection,
     registry::{Publication, PublishedServices},
     sni_for,
@@ -156,11 +156,31 @@ impl QuicEndpointActor {
         )
     }
 
-    fn handle_connect(&self, msg: ConnectMsg, connect_tasks: &mut JoinSet<()>) {
+    /// Spawn the dial for `msg`. The task replies to the caller and yields a fault
+    /// (`Some`) only when the endpoint is broken, so the run loop — draining the
+    /// `JoinSet` — can shut down, mirroring an accept-loop fault.
+    fn handle_connect(&self, msg: ConnectMsg, connect_tasks: &mut JoinSet<Option<Report<Error>>>) {
         let endpoint = self.endpoint.clone();
         connect_tasks.spawn(async move {
-            let result = endpoint.connect(&msg.caller, &msg.target).await;
-            let _ = msg.reply.send(result);
+            match endpoint.connect(&msg.caller, &msg.target).await {
+                Ok(conn) => {
+                    let _ = msg.reply.send(Ok(conn));
+                    None
+                }
+                Err(ConnectError::External(e)) => {
+                    let _ = msg.reply.send(Err(e));
+                    None
+                }
+                Err(ConnectError::Internal(e)) => {
+                    // The endpoint's outbound TLS machinery is inconsistent. Tell
+                    // the caller their dial was aborted (distinct from a routine
+                    // failure), then surface the fault to the run loop for shutdown.
+                    let _ = msg.reply.send(Err(Report::new(Error(
+                        "Connection aborted by an internal QuicEndpoint fault".into(),
+                    ))));
+                    Some(e)
+                }
+            }
         });
     }
 
@@ -217,7 +237,7 @@ impl QuicEndpointActor {
         mut connect_rx: mpsc::Receiver<ConnectMsg>,
         mut publish_rx: mpsc::Receiver<PublishMsg>,
     ) {
-        let mut connect_tasks = JoinSet::new();
+        let mut connect_tasks: JoinSet<Option<Report<Error>>> = JoinSet::new();
 
         loop {
             tokio::select! {
@@ -242,9 +262,17 @@ impl QuicEndpointActor {
                         break;
                     }
                 },
-                Some(result) = connect_tasks.join_next() => {
-                    if let Err(e) = result {
-                        log::debug!("QuicEndpointActor: connect task failed: {e:?}");
+                Some(joined) = connect_tasks.join_next() => match joined {
+                    // A connect task reported the endpoint is broken — same class of
+                    // fault as the accept loop's `Err`, so shut down likewise.
+                    Ok(Some(e)) => {
+                        // TODO(#13): surface this to telemetry rather than only logging.
+                        log::error!("QuicEndpointActor: connect faulted, shutting down: {e:?}");
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::debug!("QuicEndpointActor: connect task panicked: {e:?}");
                     }
                 },
             }
@@ -326,6 +354,36 @@ mod test {
         }
     }
 
+    /// An endpoint whose resolver always fails, so `connect` returns a routine
+    /// `ConnectError::Failed`. `close()` is allowed for the actor's `Drop`.
+    fn setup_endpoint_with_failing_resolver(registry: Arc<PublishedServices>) -> QuicEndpoint {
+        let mut resolver = MockResolver::new();
+        resolver
+            .expect_resolve()
+            .returning(|_| Err(Report::new(Error("no route".into()))));
+        let ctx = MockEndpoint::new_with_abstract_socket_context();
+        ctx.expect().returning(|_, _, _, _| {
+            let mut mock = MockEndpoint::new();
+            mock.expect_close().return_const(());
+            // `handle_connect` clones the endpoint into the spawned task; the
+            // clone never reaches `connect_with` (resolution fails first).
+            mock.expect_clone().returning(|| {
+                let mut clone = MockEndpoint::new();
+                clone.expect_close().return_const(());
+                clone
+            });
+            Ok(mock)
+        });
+        QuicEndpoint::new_with_abstract_socket(
+            Arc::new(resolver),
+            Arc::new(MockRuntime::new()),
+            Arc::new(MockAsyncUdpSocket::new()),
+            registry,
+            make_test_trust_bundle(),
+        )
+        .expect("test endpoint setup failed")
+    }
+
     fn publish(actor: &mut QuicEndpointActor, svids: Vec<X509Svid>) -> PublishResult {
         let (tx, mut rx) = oneshot::channel();
         actor.handle_publish(PublishMsg { svids, reply: tx });
@@ -373,6 +431,55 @@ mod test {
             "got: {err}"
         );
     }
+
+    // --- handle_connect: routine failure vs fault ---
+
+    #[tokio::test]
+    #[serial]
+    async fn test_handle_connect_routine_failure_replies_error_without_faulting() {
+        let registry = PublishedServices::new();
+        let actor = QuicEndpointActor {
+            endpoint: setup_endpoint_with_failing_resolver(registry.clone()),
+            registry,
+        };
+
+        let mut connect_tasks: JoinSet<Option<Report<Error>>> = JoinSet::new();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let caller = mint("spiffe://demo.flor/user/alice", Kind::User);
+        let target =
+            Dialable::new(SpiffeId::new("spiffe://demo.flor/service/api").unwrap()).unwrap();
+        actor.handle_connect(
+            ConnectMsg {
+                caller,
+                target,
+                reply: reply_tx,
+            },
+            &mut connect_tasks,
+        );
+
+        // The task yields `None`: a routine dial failure is not a fault, so the run
+        // loop would keep the endpoint running.
+        let yielded = connect_tasks
+            .join_next()
+            .await
+            .expect("the connect task was spawned")
+            .expect("the connect task did not panic");
+        assert!(
+            yielded.is_none(),
+            "a routine dial failure must not signal a fault"
+        );
+
+        // The dialing caller receives the routine error.
+        let reply = reply_rx
+            .await
+            .expect("handle_connect replied to the caller");
+        assert!(reply.is_err(), "caller must receive the routine failure");
+    }
+
+    // The `ConnectError::Fault` arm (reply "aborted" + yield `Some` → run-loop
+    // shutdown) needs a completed-but-SAN-less handshake, which a mock
+    // `quinn::Connection` can't produce; it's covered end-to-end by the
+    // integration test rather than here.
 
     // --- Drop behaviour ---
 

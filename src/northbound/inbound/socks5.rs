@@ -173,7 +173,8 @@ async fn run_listener(caller: Arc<X509Svid>, listener: TcpListener, backend: Arc
                     tasks.spawn(async move {
                         if let Err(e) = handle_socks5(stream, backend, caller).await {
                             log::warn!(target: LOG_TARGET,
-                                "Connection from {peer_addr} via SOCKS5 for principal '{principal}' error: {e:?}");
+                                "Connection from {peer_addr} via SOCKS5 for principal \
+                                 '{principal}' error: {e:?}");
                         }
                     });
                 }

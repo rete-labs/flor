@@ -25,7 +25,7 @@ pub mod actor;
 pub use actor::{QuicAcceptor, QuicConnector, QuicHandle, QuicPublisher};
 
 pub mod connection;
-use connection::{AcceptedConnection, QuicConnection};
+use connection::{HandshakeInfo, QuicConnection};
 
 mod registry;
 
@@ -60,6 +60,20 @@ enum AcceptOutcome {
     Dispatched,
     /// The endpoint has shut down; stop the accept loop.
     Closed,
+}
+
+/// Why a [`QuicEndpoint::connect`] attempt did not yield a connection.
+///
+/// A routine dial failure is the caller's to handle, whereas a fault means
+/// the endpoint itself is broken and must be shut down.
+enum ConnectError {
+    /// A routine, per-call failure — unresolvable target, unreachable peer, or a
+    /// handshake the verifiers rejected. Reported to the dialing caller; the
+    /// endpoint should be kept up.
+    External(Report<Error>),
+    /// An internal inconsistency: the endpoint's invariant is broken, so it must
+    /// be shut down.
+    Internal(Report<Error>),
 }
 
 /// The SNI routing label for a dial target: the transport's SNI-derivation seam.
@@ -170,13 +184,41 @@ impl QuicEndpoint {
     /// Builds a per-call [`ClientConfig`]: the caller SVID is presented as the
     /// client cert, and a [`SpiffeServerCertVerifier`] gates the server on
     /// `target`'s identity (SAN), not on SNI. SNI carries only the routing label
-    /// from [`sni_for`]. The returned connection's peer is `target` — the verifier
-    /// proved the server's SAN equals it.
+    /// from [`sni_for`]. The returned connection's peer identity is read from the
+    /// server's verified leaf cert — which the verifier already proved equals
+    /// `target` — so it is never re-asserted from the caller's `target`.
+    ///
+    /// The error is classified: a routine dial failure is [`ConnectError::Failed`]
+    /// (the caller's to handle), while an unreadable peer identity on a completed
+    /// handshake is a [`ConnectError::Fault`] that should stop the endpoint.
     async fn connect(
         &self,
         caller: &X509Svid,
         target: &Dialable,
-    ) -> Result<QuicConnection, Report<Error>> {
+    ) -> Result<QuicConnection, ConnectError> {
+        let conn = self
+            .dial(caller, target)
+            .await
+            .map_err(ConnectError::External)?;
+        // The verifier already proved the server's SAN equals `target`, so its
+        // cert must yield a SPIFFE id; failing to read one is an endpoint fault.
+        // `established` hands the connection back; dropping it here closes it.
+        QuicConnection::established(conn).map_err(|(_, e)| {
+            ConnectError::Internal(e.change_context(Error(format!(
+                "Outbound handshake to {} completed but its certificate has no SPIFFE identity",
+                target.id()
+            ))))
+        })
+    }
+
+    /// Run the outbound mTLS handshake, returning the raw connection. Every error
+    /// here is a routine, per-call dial failure; identity extraction is the
+    /// caller's ([`connect`](Self::connect)) job, as only that step can fault.
+    async fn dial(
+        &self,
+        caller: &X509Svid,
+        target: &Dialable,
+    ) -> Result<quinn::Connection, Report<Error>> {
         let dest_addr = self.resolver.resolve(target.id()).await?;
         let sni = sni_for(target);
         let client_config = self.client_config(caller, target)?;
@@ -186,7 +228,6 @@ impl QuicEndpoint {
             .change_context_lazy(conn_error)?
             .await
             .change_context_lazy(conn_error)
-            .map(|conn| QuicConnection::new(conn, target.id().clone()))
     }
 
     /// Build the per-call client mTLS config for dialing `target` as `caller`.
@@ -251,15 +292,27 @@ impl QuicEndpoint {
                 }
             };
 
-            let accepted = AcceptedConnection::new(conn);
+            // Wrap the handshake-complete connection, deriving the peer identity
+            // from its own cert SAN. A failure here is an internal inconsistency —
+            // the handshake guaranteed a SPIFFE peer — so we close the connection
+            // (the constructor handed it back) and surface the fault.
+            let conn = match QuicConnection::established(conn) {
+                Ok(conn) => conn,
+                Err((conn, e)) => {
+                    conn.close(VarInt::from_u32(ENDPOINT_CLOSE_CODE), b"internal-error");
+                    return Err(e.change_context(Error(
+                        "Failed to resolve peer identity for an accepted connection".into(),
+                    )));
+                }
+            };
 
             // Routing label (SNI) selects which published service was dialed. The
             // cert resolver required it to complete the handshake, so an error
             // here is an internal fault.
-            let sni = match accepted.sni() {
+            let sni = match conn.sni() {
                 Ok(sni) => sni,
                 Err(e) => {
-                    accepted.close(ENDPOINT_CLOSE_CODE, b"internal-error");
+                    conn.close(ENDPOINT_CLOSE_CODE, b"internal-error");
                     return Err(e);
                 }
             };
@@ -269,24 +322,14 @@ impl QuicEndpoint {
             // it was unpublished in the gap since — a benign race; drop and continue.
             let Some((target, dispatch)) = self.registry.route(&sni) else {
                 log::debug!("Dropping connection for '{sni}': service unpublished since handshake");
-                accepted.close(ENDPOINT_CLOSE_CODE, b"service-unavailable");
+                conn.close(ENDPOINT_CLOSE_CODE, b"service-unavailable");
                 continue;
             };
 
-            // Resolve the peer's identity from its cert SAN. Failure here is an
-            // internal inconsistency — the handshake guaranteed a SPIFFE peer.
-            let peer_id = match accepted.peer_id() {
-                Ok(peer_id) => peer_id,
-                Err(e) => {
-                    accepted.close(ENDPOINT_CLOSE_CODE, b"internal-error");
-                    return Err(e.change_context(Error(format!(
-                        "Failed to resolve peer identity for connection to '{target}'"
-                    ))));
-                }
-            };
-            log::debug!("Accepted connection for '{target}' from peer '{peer_id}'");
-
-            let conn = accepted.into_connection(peer_id);
+            log::debug!(
+                "Accepted connection for '{target}' from peer '{}'",
+                conn.peer_id()
+            );
             if dispatch.send((target, conn)).await.is_err() {
                 // Subscriber dropped its acceptor; the stale entry is reaped on
                 // the next publish.
@@ -306,9 +349,12 @@ impl QuicEndpoint {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::core::identity::{Ca, TrustDomain, load_bundle_from_pem};
+    use crate::core::identity::{
+        Ca, Kind, SpiffeId, TrustDomain, keygen_csr, load_bundle_from_pem, load_svid_from_pem,
+    };
     use crate::core::transport::resolver::MockResolver;
     use mocks::{MockAsyncUdpSocket, MockEndpoint, MockIncoming, MockRuntime};
+    use std::time::Duration;
 
     // We need to serialize tests because of global mocks for static functions in mockall
     use serial_test::serial;
@@ -352,6 +398,92 @@ mod test {
             Ok(mock)
         })
         .expect("Test setup failed: could not create QuicEndpoint")
+    }
+
+    /// Build an endpoint with a caller-supplied resolver and `MockEndpoint`
+    /// configuration — for `connect` tests, where the resolver and `connect_with`
+    /// behaviour drive the outcome.
+    fn setup_endpoint_with_resolver(
+        resolver: MockResolver,
+        mut configure: impl FnMut(&mut MockEndpoint) + Send + 'static,
+    ) -> QuicEndpoint {
+        let ctx = MockEndpoint::new_with_abstract_socket_context();
+        ctx.expect().returning(move |_, _, _, _| {
+            let mut mock = MockEndpoint::new();
+            configure(&mut mock);
+            Ok(mock)
+        });
+        QuicEndpoint::new_with_abstract_socket(
+            Arc::new(resolver),
+            Arc::new(MockRuntime::new()),
+            Arc::new(MockAsyncUdpSocket::new()),
+            registry::PublishedServices::new(),
+            make_test_trust_bundle(),
+        )
+        .expect("Test setup failed: could not create QuicEndpoint")
+    }
+
+    /// A real caller SVID `spiffe://demo.flor/user/alice` from a throwaway CA —
+    /// enough for `connect` to build a client config; the CA need not match the
+    /// endpoint's bundle since these tests never complete a handshake.
+    fn caller_svid() -> X509Svid {
+        let td = TrustDomain::new("demo.flor").unwrap();
+        let ca = Ca::init(&td, Duration::from_secs(3600)).unwrap();
+        let id = SpiffeId::new("spiffe://demo.flor/user/alice").unwrap();
+        let (key, csr) = keygen_csr(&id).unwrap();
+        let leaf = ca
+            .sign_csr(csr.as_bytes(), &id, Kind::User, Duration::from_secs(3600))
+            .unwrap();
+        load_svid_from_pem(leaf.as_bytes(), key.serialize_pem().as_bytes()).unwrap()
+    }
+
+    /// A dialable, rete-scoped service target `spiffe://demo.flor/service/<name>`.
+    fn service_target(name: &str) -> Dialable {
+        Dialable::new(SpiffeId::new(format!("spiffe://demo.flor/service/{name}")).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_connect_classifies_resolver_failure_as_failed() {
+        // A target that doesn't resolve is a routine, per-call failure — it must
+        // classify as `Failed` (caller's problem), never `Fault` (endpoint down).
+        let mut resolver = MockResolver::new();
+        resolver
+            .expect_resolve()
+            .returning(|_| Err(Report::new(Error("no route".into()))));
+        // `connect_with` is never reached when resolution fails.
+        let endpoint = setup_endpoint_with_resolver(resolver, |_mock| {});
+
+        let result = endpoint
+            .connect(&caller_svid(), &service_target("api"))
+            .await;
+        assert!(
+            matches!(result, Err(ConnectError::External(_))),
+            "an unresolvable target is a routine dial failure, not an endpoint fault"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_connect_classifies_dial_failure_as_failed() {
+        // Target resolves, the client config builds, but the QUIC dial itself
+        // fails — still a routine `Failed`, not a `Fault`.
+        let mut resolver = MockResolver::new();
+        resolver
+            .expect_resolve()
+            .returning(|_| Ok("127.0.0.1:9".parse().unwrap()));
+        let endpoint = setup_endpoint_with_resolver(resolver, |mock| {
+            mock.expect_connect_with()
+                .returning(|_, _, _| Err(quinn::ConnectError::EndpointStopping));
+        });
+
+        let result = endpoint
+            .connect(&caller_svid(), &service_target("api"))
+            .await;
+        assert!(
+            matches!(result, Err(ConnectError::External(_))),
+            "a failed QUIC dial is a routine failure, not an endpoint fault"
+        );
     }
 
     /// Helper to create a MockIncoming that resolves to a specific ConnectionError.
