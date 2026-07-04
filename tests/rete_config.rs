@@ -39,7 +39,7 @@ fn file_override(paths: &[PathBuf]) -> LoadOpts {
         repo: PathBuf::from("."),
         files: paths
             .iter()
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(|p| p.to_str().expect("test paths are valid UTF-8").to_owned())
             .collect(),
     }
 }
@@ -100,12 +100,12 @@ users:
 // ---------------------------------------------------------------------------
 
 #[test]
-fn missing_rete_yaml_returns_missing_anchor_error() {
+fn missing_rete_yaml_returns_missing_root_config_error() {
     let dir = TempDir::new().unwrap();
     let err = load(&discovery(&dir)).unwrap_err();
     assert!(
-        matches!(err.current_context(), LoadError::MissingAnchor(_)),
-        "expected MissingAnchor, got: {err}"
+        matches!(err.current_context(), LoadError::MissingRootConfig(_)),
+        "expected MissingRootConfig, got: {err}"
     );
 }
 
@@ -113,6 +113,26 @@ fn missing_rete_yaml_returns_missing_anchor_error() {
 fn malformed_yaml_returns_parse_failures() {
     let dir = TempDir::new().unwrap();
     write(&dir, "rete.yaml", "{ bad yaml: [unclosed");
+    let err = load(&discovery(&dir)).unwrap_err();
+    assert!(
+        matches!(err.current_context(), LoadError::ParseFailures(_)),
+        "expected ParseFailures, got: {err}"
+    );
+}
+
+#[test]
+fn invalid_socket_address_returns_parse_failures() {
+    let dir = TempDir::new().unwrap();
+    write(
+        &dir,
+        "rete.yaml",
+        r#"
+services:
+  broken-svc:
+    at: mgmt
+    addr: "not-an-address"
+"#,
+    );
     let err = load(&discovery(&dir)).unwrap_err();
     assert!(
         matches!(err.current_context(), LoadError::ParseFailures(_)),
@@ -322,6 +342,44 @@ nodes:
     let model = load(&discovery(&dir)).expect(".dotdir should be skipped");
     let violations = validate(&model);
     assert!(violations.is_empty());
+}
+
+#[test]
+fn repo_path_with_glob_metacharacters_is_discovered_literally() {
+    // A repo checked out under a directory name containing glob-special
+    // characters (`[`, `]`) must not have those characters reinterpreted
+    // as wildcards when building the discovery pattern. Prove the extra
+    // file was actually found (not silently skipped) via the duplicate-node
+    // merge error it triggers, mirroring `duplicate_node_name_across_files_returns_error`.
+    let base = TempDir::new().unwrap();
+    let repo = base.path().join("rete-configs [staging]");
+    std::fs::create_dir_all(repo.join("nodes")).unwrap();
+    std::fs::write(repo.join("rete.yaml"), MINIMAL).unwrap();
+    std::fs::write(
+        repo.join("nodes/extra.yaml"),
+        r#"
+nodes:
+  mgmt:
+    vertices:
+      - name: quic1
+        kind: link
+        type: quic
+        address: "9.9.9.9:4433"
+"#,
+    )
+    .unwrap();
+    let opts = LoadOpts {
+        repo: repo.clone(),
+        files: vec![],
+    };
+    let err = load(&opts).expect_err(
+        "nodes/extra.yaml redeclares node 'mgmt'; if discovery silently found no files \
+         (e.g. due to unescaped glob metacharacters in the repo path) this would load fine instead",
+    );
+    assert!(
+        matches!(err.current_context(), LoadError::Merge(_)),
+        "expected Merge error from duplicate node 'mgmt', got: {err}"
+    );
 }
 
 #[test]

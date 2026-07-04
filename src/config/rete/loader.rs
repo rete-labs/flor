@@ -8,11 +8,21 @@ use std::path::{Path, PathBuf};
 
 use error_stack::{Report, ResultExt};
 
-use super::merge::{RepoModel, merge};
-use super::model::ConfigFragment;
-use super::source::discover_files;
+use super::model::{ConfigFragment, RepoModel};
+use discover::discover_files;
+use merge::merge;
 
-pub use super::source::LoadOpts;
+mod discover;
+mod merge;
+
+/// Options controlling where config files are loaded from.
+pub struct LoadOpts {
+    /// Repository root; `rete.yaml` must exist here.
+    pub repo: PathBuf,
+    /// When non-empty, overrides discovery entirely.
+    /// At least one selected file must contain the `rete` block.
+    pub files: Vec<String>,
+}
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -52,7 +62,7 @@ impl std::error::Error for ParseFailures {}
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
     #[error("'rete.yaml' not found at repo root '{}'", .0.display())]
-    MissingAnchor(PathBuf),
+    MissingRootConfig(PathBuf),
 
     #[error("Failed to read '{}'", .0.display())]
     Io(PathBuf),
@@ -62,6 +72,9 @@ pub enum LoadError {
 
     #[error("Invalid glob pattern '{0}'")]
     Discovery(String),
+
+    #[error("Invalid path: '{}'", .0.display())]
+    InvalidPath(PathBuf),
 
     #[error("{0}")]
     Merge(String),
@@ -80,17 +93,17 @@ pub fn load(opts: &LoadOpts) -> Result<RepoModel, Report<LoadError>> {
     // Phase 1: read rete.yaml early (in discovery mode) to get the source block
     // for discovery; in -f override mode this step is skipped.
     // The parsed fragment is saved so Phase 3 can inject it directly, avoiding
-    // a second parse of the anchor file.
-    let (source_block, anchor_fragment) = if opts.files.is_empty() {
-        let anchor = opts.repo.join("rete.yaml");
-        if !anchor.exists() {
-            return Err(Report::new(LoadError::MissingAnchor(opts.repo.clone())));
+    // a second parse of the root config file.
+    let (source_block, root_config_fragment) = if opts.files.is_empty() {
+        let root_config = opts.repo.join("rete.yaml");
+        if !root_config.exists() {
+            return Err(Report::new(LoadError::MissingRootConfig(opts.repo.clone())));
         }
-        let raw = read_bytes(&anchor)?;
-        let fragment = parse_bytes(&raw, &anchor)
+        let raw = read_bytes(&root_config)?;
+        let fragment = parse_bytes(&raw, &root_config)
             .map_err(|e| Report::new(LoadError::ParseFailures(ParseFailures(vec![e]))))?;
         let source = fragment.source.clone();
-        (source, Some((anchor, fragment)))
+        (source, Some((root_config, fragment)))
     } else {
         (None, None)
     };
@@ -99,12 +112,12 @@ pub fn load(opts: &LoadOpts) -> Result<RepoModel, Report<LoadError>> {
     let paths = discover_files(opts, source_block.as_ref())?;
 
     // Phase 3: parse all files, collecting every failure before bailing.
-    // The anchor is injected from Phase 1; paths contains only the remaining files.
+    // The root config is injected from Phase 1; paths contains only the remaining files.
     let mut parsed: Vec<(PathBuf, ConfigFragment)> = Vec::with_capacity(paths.len() + 1);
     let mut parse_errors: Vec<FileParseError> = Vec::new();
 
-    if let Some((anchor_path, fragment)) = anchor_fragment {
-        parsed.push((anchor_path, fragment));
+    if let Some((root_config_path, fragment)) = root_config_fragment {
+        parsed.push((root_config_path, fragment));
     }
 
     for path in &paths {

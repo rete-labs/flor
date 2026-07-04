@@ -4,11 +4,9 @@
 //! Rete config loading, merging, and validation.
 
 pub mod loader;
-pub mod merge;
 pub mod model;
-pub mod source;
 pub mod validate;
 
 pub use loader::{LoadError, LoadOpts, load};
-pub use merge::RepoModel;
+pub use model::RepoModel;
 pub use validate::{Rule, Violation, validate};

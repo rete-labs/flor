@@ -1,6 +1,8 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
+use std::net::SocketAddr;
+
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -11,9 +13,9 @@ pub struct Service {
     /// Vertex on that node (optional when node has exactly one vertex).
     pub via: Option<String>,
     /// Local address the service binds to; flor forwards here.
-    pub addr: String,
+    pub addr: SocketAddr,
     /// SOCKS5 port flor exposes for this service's outbound calls.
-    pub socks5_proxy: Option<String>,
+    pub socks5_proxy: Option<SocketAddr>,
     /// Groups this service belongs to (ingress ACL — who may reach it).
     #[serde(default)]
     pub groups: Vec<String>,
@@ -25,7 +27,7 @@ pub struct Service {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum ServiceScope {
     Rete,
     Node,

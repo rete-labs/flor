@@ -16,13 +16,14 @@ use error_stack::{FrameKind, Report, ResultExt};
 pub struct Error(String);
 
 /// Print an error report to stderr with a bold-red `error:` prefix, in the
-/// style of `cargo` / `rustc`.
+/// style of `cargo` / `rustc`, and log the full error-stack tree.
 ///
 /// - `verbose = false`: compact anyhow-style chain — each context's
 ///   message joined by `": "`. Hides frame locations and internal lib detail.
 /// - `verbose = true`: full error-stack tree via `Debug`. Use when the
 ///   compact chain doesn't point at the cause.
 pub fn print_error<E>(report: &Report<E>, verbose: bool) {
+    log::error!("{report:?}");
     let style = error_prefix_style();
     if verbose {
         eprintln!("{style}error:{style:#} {report:?}");
@@ -59,17 +60,6 @@ impl<E> fmt::Display for CompactChain<'_, E> {
         }
         Ok(())
     }
-}
-
-/// Print a load error to stderr (clean readable message) and to the log (full chain).
-///
-/// Use this for operational failures during config loading — missing files, I/O errors,
-/// parse failures — where the full error-stack debug output is developer-relevant but
-/// not useful to the operator reading the terminal.
-pub fn print_load_error<E: std::error::Error>(report: &Report<E>) {
-    log::error!("{report:?}");
-    let style = error_prefix_style();
-    eprintln!("{style}error:{style:#} {}", CompactChain(report));
 }
 
 /// Write a file holding private key material.

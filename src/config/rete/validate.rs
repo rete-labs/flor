@@ -8,8 +8,7 @@
 
 use std::fmt;
 
-use super::merge::RepoModel;
-use super::model::{VertexKind, VertexType};
+use super::model::{RepoModel, VertexKind, VertexType};
 
 const SVC_CONFIG_SERVER: &str = "config-server";
 const SVC_CONFIG_PUBLISHER: &str = "config-publisher";
@@ -538,10 +537,9 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use super::super::merge::RepoModel;
     use super::super::model::{
-        Ca, Group, MgmtSigners, Node, Rete, Role, Service, Signers, User, UserNode, Vertex,
-        VertexKind, VertexType,
+        Ca, Group, MgmtSigners, Node, RepoModel, Rete, Role, Service, Signers, User, UserNode,
+        Vertex, VertexKind, VertexType,
     };
     use super::{Rule, Violation, validate};
 
@@ -567,7 +565,7 @@ mod tests {
             name: name.into(),
             kind: VertexKind::Link,
             vertex_type: VertexType::Quic,
-            address: address.map(String::from),
+            address: address.map(|a| a.parse().unwrap()),
         }
     }
 
@@ -581,7 +579,7 @@ mod tests {
         Service {
             at: node.into(),
             via: None,
-            addr: "127.0.0.1:9000".into(),
+            addr: "127.0.0.1:9000".parse().unwrap(),
             socks5_proxy: None,
             groups: groups.into_iter().map(String::from).collect(),
             roles: vec![],
@@ -742,7 +740,7 @@ mod tests {
             Service {
                 at: "mgmt".into(),
                 via: None,
-                addr: "127.0.0.1:8080".into(),
+                addr: "127.0.0.1:8080".parse().unwrap(),
                 socks5_proxy: None,
                 groups: vec!["ghost-group".into()],
                 roles: vec![],
@@ -762,7 +760,7 @@ mod tests {
             Service {
                 at: "mgmt".into(),
                 via: None,
-                addr: "127.0.0.1:8080".into(),
+                addr: "127.0.0.1:8080".parse().unwrap(),
                 socks5_proxy: None,
                 groups: vec![],
                 roles: vec!["ghost-role".into()],
@@ -786,7 +784,7 @@ mod tests {
             Service {
                 at: "mgmt".into(),
                 via: None,
-                addr: "127.0.0.1:8080".into(),
+                addr: "127.0.0.1:8080".parse().unwrap(),
                 socks5_proxy: None,
                 groups: vec![],
                 roles: vec![],
@@ -846,7 +844,7 @@ mod tests {
             Service {
                 at: "nonexistent-node".into(),
                 via: None,
-                addr: "127.0.0.1:8080".into(),
+                addr: "127.0.0.1:8080".parse().unwrap(),
                 socks5_proxy: None,
                 groups: vec![],
                 roles: vec![],
@@ -1123,7 +1121,7 @@ mod tests {
                     name: "link0".into(),
                     kind: VertexKind::Link,
                     vertex_type: VertexType::Udp,
-                    address: Some("1.2.3.4:5000".into()),
+                    address: Some("1.2.3.4:5000".parse().unwrap()),
                 }],
             },
         );
@@ -1175,7 +1173,7 @@ mod tests {
             Service {
                 at: "worker".into(),
                 via: None,
-                addr: "127.0.0.1:8080".into(),
+                addr: "127.0.0.1:8080".parse().unwrap(),
                 socks5_proxy: None,
                 groups: vec![],
                 roles: vec![],
@@ -1206,7 +1204,7 @@ mod tests {
             Service {
                 at: "mgmt".into(),
                 via: Some("ghost-vertex".into()),
-                addr: "127.0.0.1:8080".into(),
+                addr: "127.0.0.1:8080".parse().unwrap(),
                 socks5_proxy: None,
                 groups: vec![],
                 roles: vec![],
@@ -1247,7 +1245,7 @@ mod tests {
             Service {
                 at: "multi".into(),
                 via: None,
-                addr: "127.0.0.1:8080".into(),
+                addr: "127.0.0.1:8080".parse().unwrap(),
                 socks5_proxy: None,
                 groups: vec![],
                 roles: vec![],
@@ -1342,8 +1340,8 @@ mod tests {
             Service {
                 at: "mgmt".into(),
                 via: None,
-                addr: "127.0.0.1:8080".into(),
-                socks5_proxy: Some("127.0.0.1:1080".into()),
+                addr: "127.0.0.1:8080".parse().unwrap(),
+                socks5_proxy: Some("127.0.0.1:1080".parse().unwrap()),
                 groups: vec![],
                 roles: vec![],
                 scope: None,
@@ -1369,8 +1367,8 @@ mod tests {
             Service {
                 at: "mgmt".into(),
                 via: None,
-                addr: "127.0.0.1:8080".into(),
-                socks5_proxy: Some("127.0.0.1:1080".into()),
+                addr: "127.0.0.1:8080".parse().unwrap(),
+                socks5_proxy: Some("127.0.0.1:1080".parse().unwrap()),
                 groups: vec![],
                 roles: vec!["node".into()],
                 scope: None,
