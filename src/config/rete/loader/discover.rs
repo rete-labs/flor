@@ -1,24 +1,16 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-//! Source file discovery for rete config repositories.
+//! File discovery for rete config repositories.
 
 use std::path::{Path, PathBuf};
 
 use glob::glob;
 
-use super::loader::LoadError;
-use super::model::Source;
 use error_stack::{Report, ResultExt};
 
-/// Options controlling where config files are loaded from.
-pub struct LoadOpts {
-    /// Repository root; `rete.yaml` must exist here.
-    pub repo: PathBuf,
-    /// When non-empty, overrides discovery entirely.
-    /// At least one selected file must contain the `rete` block.
-    pub files: Vec<String>,
-}
+use super::super::model::Source;
+use super::{LoadError, LoadOpts};
 
 /// Discover all YAML source files to load.
 ///
@@ -37,9 +29,9 @@ fn discover_from_repo(
     repo: &Path,
     source: Option<&Source>,
 ) -> Result<Vec<PathBuf>, Report<LoadError>> {
-    // rete.yaml is handled separately by the loader (already parsed in Phase 1);
+    // rete.yaml is handled separately by the loader;
     // exclude it from discovery so it isn't parsed a second time.
-    let anchor = repo.join("rete.yaml");
+    let root_config = repo.join("rete.yaml");
     let mut paths = Vec::new();
 
     let include_globs: Vec<String> = source
@@ -48,20 +40,25 @@ fn discover_from_repo(
 
     let exclude_globs: Vec<String> = source.and_then(|s| s.exclude.clone()).unwrap_or_default();
 
+    // Escape the repo path so any glob metacharacters it happens to contain
+    // (e.g. `[`, `]`, `*` in a directory name) are treated literally; only
+    // `pattern` itself should be interpreted as a glob.
+    let escaped_repo = escaped_repo_path(repo)?;
+
     for pattern in &include_globs {
-        let full_pattern = repo.join(pattern);
-        let full_pattern_str = full_pattern.to_string_lossy();
-        for entry in glob(&full_pattern_str)
+        let full_pattern = escaped_repo.join(pattern);
+        let full_pattern_str = path_to_str(&full_pattern)?;
+        for entry in glob(full_pattern_str)
             .change_context_lazy(|| LoadError::Discovery(pattern.clone()))?
             .flatten()
         {
-            if should_skip(&entry, repo) {
+            if should_skip(&entry, repo)? {
                 continue;
             }
-            if is_excluded(&entry, repo, &exclude_globs) {
+            if is_excluded(&entry, &escaped_repo, &exclude_globs)? {
                 continue;
             }
-            if entry == anchor {
+            if entry == root_config {
                 continue;
             }
             if !paths.contains(&entry) {
@@ -71,6 +68,19 @@ fn discover_from_repo(
     }
 
     Ok(paths)
+}
+
+/// Escape a repo path for safe embedding in a glob pattern, so characters
+/// meaningful to `repo` (a real filesystem path) aren't reinterpreted as
+/// glob wildcards.
+fn escaped_repo_path(repo: &Path) -> Result<PathBuf, Report<LoadError>> {
+    let repo_str = path_to_str(repo)?;
+    Ok(PathBuf::from(glob::Pattern::escape(repo_str)))
+}
+
+fn path_to_str(path: &Path) -> Result<&str, Report<LoadError>> {
+    path.to_str()
+        .ok_or_else(|| Report::new(LoadError::InvalidPath(path.to_path_buf())))
 }
 
 fn expand_overrides(patterns: &[String]) -> Result<Vec<PathBuf>, Report<LoadError>> {
@@ -97,34 +107,38 @@ fn expand_overrides(patterns: &[String]) -> Result<Vec<PathBuf>, Report<LoadErro
     Ok(paths)
 }
 
-fn should_skip(path: &Path, repo: &Path) -> bool {
+fn should_skip(path: &Path, repo: &Path) -> Result<bool, Report<LoadError>> {
     let Ok(rel) = path.strip_prefix(repo) else {
-        return false;
+        return Ok(false);
     };
 
     for component in rel.components() {
-        let name = component.as_os_str().to_string_lossy();
+        let name = path_to_str(component.as_ref())?;
         // Skip dotfiles and dotdirs
         if name.starts_with('.') {
-            return true;
+            return Ok(true);
         }
         // Skip certs/ directories
         if name == "certs" {
-            return true;
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
 }
 
-fn is_excluded(path: &Path, repo: &Path, exclude_globs: &[String]) -> bool {
+fn is_excluded(
+    path: &Path,
+    escaped_repo: &Path,
+    exclude_globs: &[String],
+) -> Result<bool, Report<LoadError>> {
     for pattern in exclude_globs {
-        let full_pattern = repo.join(pattern);
-        let full_pattern_str = full_pattern.to_string_lossy();
-        if let Ok(g) = glob::Pattern::new(&full_pattern_str)
+        let full_pattern = escaped_repo.join(pattern);
+        let full_pattern_str = path_to_str(&full_pattern)?;
+        if let Ok(g) = glob::Pattern::new(full_pattern_str)
             && g.matches_path(path)
         {
-            return true;
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
 }

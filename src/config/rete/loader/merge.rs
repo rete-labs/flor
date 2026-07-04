@@ -9,23 +9,8 @@ use std::path::{Path, PathBuf};
 
 use error_stack::Report;
 
-use super::loader::LoadError;
-use super::model::{ConfigFragment, Group, Node, Rete, Role, Service, User};
-
-/// The merged whole-view of a rete config repository.
-///
-/// All collections are unioned from every source file; the `rete` block is
-/// the single canonical rete metadata entry.
-#[derive(Debug)]
-pub struct RepoModel {
-    pub rete: Rete,
-    pub nodes: HashMap<String, Node>,
-    pub services: HashMap<String, Service>,
-    /// Values are `Option<Group>` to preserve null-body reserved groups.
-    pub groups: HashMap<String, Option<Group>>,
-    pub roles: HashMap<String, Role>,
-    pub users: HashMap<String, User>,
-}
+use super::super::model::{ConfigFragment, Group, Node, RepoModel, Rete, Role, Service, User};
+use super::LoadError;
 
 fn merge_entries<V>(
     target: &mut HashMap<String, V>,
@@ -127,8 +112,8 @@ pub fn merge(
 mod tests {
     use std::path::PathBuf;
 
-    use super::super::loader::LoadError;
-    use super::super::model::ConfigFragment;
+    use super::super::super::model::ConfigFragment;
+    use super::super::LoadError;
     use super::merge;
 
     fn fragment(yaml: &str) -> (PathBuf, ConfigFragment) {

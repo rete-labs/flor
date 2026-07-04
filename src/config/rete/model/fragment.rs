@@ -20,8 +20,6 @@ pub struct ConfigFragment {
     pub rete: Option<Rete>,
     pub nodes: Option<UniqueMap<String, Node>>,
     pub services: Option<UniqueMap<String, Service>>,
-    /// Values are `Option<Group>` because reserved groups like `config-read:`
-    /// may appear with a null YAML body.
     pub groups: Option<UniqueMap<String, Option<Group>>>,
     pub roles: Option<UniqueMap<String, Role>>,
     pub users: Option<UniqueMap<String, User>>,

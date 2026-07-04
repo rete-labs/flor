@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use error_stack::{Report, ResultExt};
 
 use flor::{
-    cli::{print_error, print_load_error, write_secret},
+    cli::{print_error, write_secret},
     config::rete::{LoadOpts, load, validate},
     core::identity::{Ca, Kind, TrustDomain, build_id},
 };
@@ -119,30 +119,30 @@ fn main() {
     };
     let _ = flor::logging::logger::init(log_level);
 
-    if let Err(e) = run(cli.cmd) {
+    if let Err(e) = run(cli.cmd, cli.verbose) {
         print_error(&e, cli.verbose);
         std::process::exit(1);
     }
 }
 
-fn run(cmd: Cmd) -> Result<(), Report<Error>> {
+fn run(cmd: Cmd, verbose: bool) -> Result<(), Report<Error>> {
     match cmd {
         Cmd::Ca { action } => match action {
             CaAction::Init(args) => ca_init(args),
             CaAction::Sign(args) => ca_sign(args),
         },
-        Cmd::Validate(args) => cmd_validate(args),
+        Cmd::Validate(args) => cmd_validate(args, verbose),
     }
 }
 
-fn cmd_validate(args: ValidateArgs) -> Result<(), Report<Error>> {
+fn cmd_validate(args: ValidateArgs, verbose: bool) -> Result<(), Report<Error>> {
     let opts = LoadOpts {
         repo: args.repo,
         files: args.files,
     };
 
     let model = load(&opts).map_err(|e| {
-        print_load_error(&e);
+        print_error(&e, verbose);
         Report::new(Error("config load failed".into()))
     })?;
 
