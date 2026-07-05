@@ -17,15 +17,15 @@ fn merge_entries<V>(
     source: impl IntoIterator<Item = (String, V)>,
     kind: &str,
     path: &Path,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Report<LoadError>>,
 ) {
     for (name, def) in source {
         match target.entry(name) {
-            Entry::Occupied(e) => errors.push(format!(
+            Entry::Occupied(e) => errors.push(Report::new(LoadError::Merge(format!(
                 "Duplicate {kind} '{}' in '{}'",
                 e.key(),
                 path.display()
-            )),
+            )))),
             Entry::Vacant(e) => {
                 e.insert(def);
             }
@@ -40,24 +40,24 @@ fn merge_entries<V>(
 pub fn merge(
     files: Vec<(PathBuf, ConfigFragment)>,
     discovery_mode: bool,
-) -> Result<RepoModel, Report<LoadError>> {
+) -> Result<RepoModel, Vec<Report<LoadError>>> {
     let mut rete_block: Option<(PathBuf, Rete)> = None;
     let mut nodes: HashMap<String, Node> = HashMap::new();
     let mut services: HashMap<String, Service> = HashMap::new();
     let mut groups: HashMap<String, Option<Group>> = HashMap::new();
     let mut roles: HashMap<String, Role> = HashMap::new();
     let mut users: HashMap<String, User> = HashMap::new();
-    let mut merge_errors: Vec<String> = Vec::new();
+    let mut merge_errors: Vec<Report<LoadError>> = Vec::new();
 
     for (path, fragment) in files {
         // --- rete singleton ---
         if let Some(rete) = fragment.rete {
             if let Some((ref existing_path, _)) = rete_block {
-                merge_errors.push(format!(
+                merge_errors.push(Report::new(LoadError::Merge(format!(
                     "Duplicate `rete` block: found in both '{}' and '{}'",
                     existing_path.display(),
                     path.display(),
-                ));
+                ))));
             } else {
                 rete_block = Some((path.clone(), rete));
             }
@@ -90,12 +90,12 @@ pub fn merge(
         } else {
             "No `rete` block found in the specified files; at least one must contain a `rete:` entry".into()
         };
-        merge_errors.push(msg);
-        return Err(Report::new(LoadError::Merge(merge_errors.join("; "))));
+        merge_errors.push(Report::new(LoadError::Merge(msg)));
+        return Err(merge_errors);
     };
 
     if !merge_errors.is_empty() {
-        return Err(Report::new(LoadError::Merge(merge_errors.join("; "))));
+        return Err(merge_errors);
     }
 
     Ok(RepoModel {
@@ -113,7 +113,6 @@ mod tests {
     use std::path::PathBuf;
 
     use super::super::super::model::ConfigFragment;
-    use super::super::LoadError;
     use super::merge;
 
     fn fragment(yaml: &str) -> (PathBuf, ConfigFragment) {
@@ -206,8 +205,9 @@ services:
             named("rete.yaml", RETE_BLOCK),
             named("other.yaml", RETE_BLOCK),
         ];
-        let err = merge(files, true).unwrap_err();
-        let msg = err.current_context().to_string();
+        let errs = merge(files, true).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        let msg = errs[0].current_context().to_string();
         assert!(msg.contains("Duplicate `rete`"), "got: {msg}");
     }
 
@@ -217,19 +217,17 @@ services:
 
     #[test]
     fn missing_rete_block_discovery_mode_returns_error() {
-        let err = merge(vec![fragment(NODE_A)], true).unwrap_err();
-        let LoadError::Merge(msg) = err.current_context() else {
-            panic!("expected Merge error");
-        };
+        let errs = merge(vec![fragment(NODE_A)], true).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        let msg = errs[0].current_context().to_string();
         assert!(msg.contains("rete.yaml"), "got: {msg}");
     }
 
     #[test]
     fn missing_rete_block_override_mode_returns_error() {
-        let err = merge(vec![fragment(NODE_A)], false).unwrap_err();
-        let LoadError::Merge(msg) = err.current_context() else {
-            panic!("expected Merge error");
-        };
+        let errs = merge(vec![fragment(NODE_A)], false).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        let msg = errs[0].current_context().to_string();
         assert!(msg.contains("specified files"), "got: {msg}");
     }
 
@@ -243,10 +241,9 @@ services:
             named("file1.yaml", &format!("{RETE_BLOCK}{NODE_A}")),
             named("file2.yaml", NODE_A),
         ];
-        let err = merge(files, true).unwrap_err();
-        let LoadError::Merge(msg) = err.current_context() else {
-            panic!("expected Merge error");
-        };
+        let errs = merge(files, true).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        let msg = errs[0].current_context().to_string();
         assert!(msg.contains("Duplicate node 'node-a'"), "got: {msg}");
     }
 
@@ -256,10 +253,9 @@ services:
             named("file1.yaml", &format!("{RETE_BLOCK}{SVC_A}")),
             named("file2.yaml", SVC_A),
         ];
-        let err = merge(files, true).unwrap_err();
-        let LoadError::Merge(msg) = err.current_context() else {
-            panic!("expected Merge error");
-        };
+        let errs = merge(files, true).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        let msg = errs[0].current_context().to_string();
         assert!(msg.contains("Duplicate service 'svc-a'"), "got: {msg}");
     }
 
@@ -270,10 +266,9 @@ services:
             named("file1.yaml", &format!("{RETE_BLOCK}{role_yaml}")),
             named("file2.yaml", role_yaml),
         ];
-        let err = merge(files, true).unwrap_err();
-        let LoadError::Merge(msg) = err.current_context() else {
-            panic!("expected Merge error");
-        };
+        let errs = merge(files, true).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        let msg = errs[0].current_context().to_string();
         assert!(msg.contains("Duplicate role 'admin'"), "got: {msg}");
     }
 
@@ -284,10 +279,9 @@ services:
             named("file1.yaml", &format!("{RETE_BLOCK}{user_yaml}")),
             named("file2.yaml", user_yaml),
         ];
-        let err = merge(files, true).unwrap_err();
-        let LoadError::Merge(msg) = err.current_context() else {
-            panic!("expected Merge error");
-        };
+        let errs = merge(files, true).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        let msg = errs[0].current_context().to_string();
         assert!(msg.contains("Duplicate user 'alice'"), "got: {msg}");
     }
 
@@ -298,10 +292,9 @@ services:
             named("file1.yaml", &format!("{RETE_BLOCK}{group_yaml}")),
             named("file2.yaml", group_yaml),
         ];
-        let err = merge(files, true).unwrap_err();
-        let LoadError::Merge(msg) = err.current_context() else {
-            panic!("expected Merge error");
-        };
+        let errs = merge(files, true).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        let msg = errs[0].current_context().to_string();
         assert!(msg.contains("Duplicate group 'my-group'"), "got: {msg}");
     }
 
@@ -317,11 +310,14 @@ services:
             named("file1.yaml", &format!("{RETE_BLOCK}{combined}")),
             named("file2.yaml", &combined),
         ];
-        let err = merge(files, true).unwrap_err();
-        let LoadError::Merge(msg) = err.current_context() else {
-            panic!("expected Merge error");
-        };
-        assert!(msg.contains("node-a"), "got: {msg}");
-        assert!(msg.contains("svc-a"), "got: {msg}");
+        let errs = merge(files, true).unwrap_err();
+        assert_eq!(errs.len(), 2);
+        let combined = errs
+            .iter()
+            .map(|e| e.current_context().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(combined.contains("node-a"), "got: {combined}");
+        assert!(combined.contains("svc-a"), "got: {combined}");
     }
 }
