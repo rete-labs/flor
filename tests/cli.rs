@@ -338,7 +338,7 @@ users:
         "expected violation in stderr, got: {stderr}"
     );
     assert!(
-        stderr.contains("violation(s) found"),
+        stderr.contains("config validation failed due to previous"),
         "expected summary in stderr, got: {stderr}"
     );
 }

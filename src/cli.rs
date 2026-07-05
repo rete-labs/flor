@@ -44,6 +44,26 @@ fn error_prefix_style() -> Style {
     }
 }
 
+/// Render the compact (non-verbose) chain for `report`: each context's
+/// message joined by `": "`.
+pub fn compact_chain<E>(report: &Report<E>) -> String {
+    CompactChain(report).to_string()
+}
+
+/// Print a rustc-style error report: one bold-red `error:` line per entry in
+/// `lines`, followed by a summary line — `error: config {stage} failed due
+/// to previous N errors` — naming the count. Used for stages that can
+/// surface multiple independent causes at once (config load, config
+/// validation) instead of a single causal chain.
+pub fn print_error_lines(lines: &[String], stage: &str) {
+    let style = error_prefix_style();
+    for line in lines {
+        eprintln!("{style}error:{style:#} {line}");
+    }
+    let n = lines.len();
+    eprintln!("{style}error:{style:#} config {stage} failed due to previous {n} error(s)");
+}
+
 struct CompactChain<'a, E>(&'a Report<E>);
 
 impl<E> fmt::Display for CompactChain<'_, E> {

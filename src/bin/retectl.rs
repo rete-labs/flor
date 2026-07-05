@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use error_stack::{Report, ResultExt};
 
 use flor::{
-    cli::{print_error, write_secret},
+    cli::{compact_chain, print_error, print_error_lines, write_secret},
     config::rete::{LoadOpts, load, validate},
     core::identity::{Ca, Kind, TrustDomain, build_id},
 };
@@ -24,10 +24,6 @@ struct Error(String);
 #[derive(Parser, Debug)]
 #[command(name = "retectl", about = "Florete operator CLI (rete authoring)")]
 struct Cli {
-    /// Enable debug logging (also prints full error chains on failure).
-    #[arg(short, long, global = true)]
-    verbose: bool,
-
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -109,42 +105,56 @@ struct CaSignArgs {
     out: PathBuf,
 }
 
+/// Full error-stack chains and logs are developer diagnostics for `retectl`
+/// itself (source locations, internal trace) — not actionable for an
+/// operator, who already gets the causal chain in the compact output. So
+/// both are gated to debug builds rather than a user-facing flag. The log
+/// level defaults to `Info`; override via `RUST_LOG` when tracing an issue.
+#[cfg(debug_assertions)]
+const DEBUG: bool = true;
+#[cfg(not(debug_assertions))]
+const DEBUG: bool = false;
+
 fn main() {
     let cli = Cli::parse();
 
-    let log_level = if cli.verbose {
-        log::LevelFilter::Debug
-    } else {
-        log::LevelFilter::Warn
-    };
-    let _ = flor::logging::logger::init(log_level);
+    if DEBUG {
+        let _ = flor::logging::logger::init(log::LevelFilter::Info);
+    }
 
-    if let Err(e) = run(cli.cmd, cli.verbose) {
-        print_error(&e, cli.verbose);
+    if let Err(e) = run(cli.cmd) {
+        print_error(&e, DEBUG);
         std::process::exit(1);
     }
 }
 
-fn run(cmd: Cmd, verbose: bool) -> Result<(), Report<Error>> {
+fn run(cmd: Cmd) -> Result<(), Report<Error>> {
     match cmd {
         Cmd::Ca { action } => match action {
             CaAction::Init(args) => ca_init(args),
             CaAction::Sign(args) => ca_sign(args),
         },
-        Cmd::Validate(args) => cmd_validate(args, verbose),
+        Cmd::Validate(args) => cmd_validate(args),
     }
 }
 
-fn cmd_validate(args: ValidateArgs, verbose: bool) -> Result<(), Report<Error>> {
+fn cmd_validate(args: ValidateArgs) -> Result<(), Report<Error>> {
     let opts = LoadOpts {
         repo: args.repo,
         files: args.files,
     };
 
-    let model = load(&opts).map_err(|e| {
-        print_error(&e, verbose);
-        Report::new(Error("config load failed".into()))
-    })?;
+    let model = match load(&opts) {
+        Ok(model) => model,
+        Err(failures) => {
+            for f in &failures {
+                log::error!("{f:?}");
+            }
+            let lines: Vec<String> = failures.iter().map(compact_chain).collect();
+            print_error_lines(&lines, "load");
+            std::process::exit(1);
+        }
+    };
 
     let violations = validate(&model);
 
@@ -153,13 +163,12 @@ fn cmd_validate(args: ValidateArgs, verbose: bool) -> Result<(), Report<Error>> 
         return Ok(());
     }
 
-    for v in &violations {
-        eprintln!("  [{}] {}", v.rule, v.message);
-    }
-    Err(Report::new(Error(format!(
-        "{} violation(s) found",
-        violations.len()
-    ))))
+    let lines: Vec<String> = violations
+        .iter()
+        .map(|v| format!("[{}] {}", v.rule, v.message))
+        .collect();
+    print_error_lines(&lines, "validation");
+    std::process::exit(1);
 }
 
 fn ca_init(args: CaInitArgs) -> Result<(), Report<Error>> {

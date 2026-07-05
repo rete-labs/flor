@@ -102,10 +102,11 @@ users:
 #[test]
 fn missing_rete_yaml_returns_missing_root_config_error() {
     let dir = TempDir::new().unwrap();
-    let err = load(&discovery(&dir)).unwrap_err();
+    let errs = load(&discovery(&dir)).unwrap_err();
+    assert_eq!(errs.len(), 1);
     assert!(
-        matches!(err.current_context(), LoadError::MissingRootConfig(_)),
-        "expected MissingRootConfig, got: {err}"
+        matches!(errs[0].current_context(), LoadError::MissingRootConfig(_)),
+        "expected MissingRootConfig, got: {errs:?}"
     );
 }
 
@@ -113,10 +114,11 @@ fn missing_rete_yaml_returns_missing_root_config_error() {
 fn malformed_yaml_returns_parse_failures() {
     let dir = TempDir::new().unwrap();
     write(&dir, "rete.yaml", "{ bad yaml: [unclosed");
-    let err = load(&discovery(&dir)).unwrap_err();
+    let errs = load(&discovery(&dir)).unwrap_err();
     assert!(
-        matches!(err.current_context(), LoadError::ParseFailures(_)),
-        "expected ParseFailures, got: {err}"
+        errs.iter()
+            .any(|e| matches!(e.current_context(), LoadError::Parse(_))),
+        "expected Parse error, got: {errs:?}"
     );
 }
 
@@ -133,10 +135,11 @@ services:
     addr: "not-an-address"
 "#,
     );
-    let err = load(&discovery(&dir)).unwrap_err();
+    let errs = load(&discovery(&dir)).unwrap_err();
     assert!(
-        matches!(err.current_context(), LoadError::ParseFailures(_)),
-        "expected ParseFailures, got: {err}"
+        errs.iter()
+            .any(|e| matches!(e.current_context(), LoadError::Parse(_))),
+        "expected Parse error, got: {errs:?}"
     );
 }
 
@@ -161,10 +164,11 @@ servies:
     addr: "127.0.0.1:8080"
 "#,
     );
-    let err = load(&discovery(&dir)).unwrap_err();
+    let errs = load(&discovery(&dir)).unwrap_err();
     assert!(
-        matches!(err.current_context(), LoadError::ParseFailures(_)),
-        "expected ParseFailures for unknown field 'servies', got: {err}"
+        errs.iter()
+            .any(|e| matches!(e.current_context(), LoadError::Parse(_))),
+        "expected Parse error for unknown field 'servies', got: {errs:?}"
     );
 }
 
@@ -206,13 +210,15 @@ nodes:
         address: "5.6.7.8:4433"
 "#,
     );
-    let err = load(&discovery(&dir)).unwrap_err();
+    let errs = load(&discovery(&dir)).unwrap_err();
     assert!(
-        matches!(err.current_context(), LoadError::Merge(_)),
-        "expected Merge error for duplicate node, got: {err}"
+        errs.iter()
+            .any(|e| matches!(e.current_context(), LoadError::Merge(_))),
+        "expected Merge error for duplicate node, got: {errs:?}"
     );
     assert!(
-        err.to_string().contains("mgmt") || format!("{err:?}").contains("mgmt"),
+        errs.iter()
+            .any(|e| e.to_string().contains("mgmt") || format!("{e:?}").contains("mgmt")),
         "error should name the duplicate key"
     );
 }
@@ -248,10 +254,11 @@ rete:
       keys: []
 "#,
     );
-    let err = load(&discovery(&dir)).unwrap_err();
+    let errs = load(&discovery(&dir)).unwrap_err();
     assert!(
-        matches!(err.current_context(), LoadError::Merge(_)),
-        "expected Merge error for duplicate rete block, got: {err}"
+        errs.iter()
+            .any(|e| matches!(e.current_context(), LoadError::Merge(_))),
+        "expected Merge error for duplicate rete block, got: {errs:?}"
     );
 }
 
@@ -287,10 +294,11 @@ nodes:
     )
     .unwrap();
 
-    let err = load(&file_override(&[cfg])).unwrap_err();
+    let errs = load(&file_override(&[cfg])).unwrap_err();
     assert!(
-        matches!(err.current_context(), LoadError::Merge(_)),
-        "expected Merge error when rete block is absent, got: {err}"
+        errs.iter()
+            .any(|e| matches!(e.current_context(), LoadError::Merge(_))),
+        "expected Merge error when rete block is absent, got: {errs:?}"
     );
 }
 
@@ -372,13 +380,14 @@ nodes:
         repo: repo.clone(),
         files: vec![],
     };
-    let err = load(&opts).expect_err(
+    let errs = load(&opts).expect_err(
         "nodes/extra.yaml redeclares node 'mgmt'; if discovery silently found no files \
          (e.g. due to unescaped glob metacharacters in the repo path) this would load fine instead",
     );
     assert!(
-        matches!(err.current_context(), LoadError::Merge(_)),
-        "expected Merge error from duplicate node 'mgmt', got: {err}"
+        errs.iter()
+            .any(|e| matches!(e.current_context(), LoadError::Merge(_))),
+        "expected Merge error from duplicate node 'mgmt', got: {errs:?}"
     );
 }
 
