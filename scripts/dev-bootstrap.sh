@@ -18,7 +18,7 @@
 #   - alice, bob   on node alpha   (kind user,    rete-scoped) — SOCKS5 callers
 #   - tcp-echo     on node beta    (kind service, node-scoped to beta) — target
 #
-# This is dev tooling only — it stitches together the same `flor` / `florctl`
+# This is dev tooling only — it stitches together the same `flor` / `retectl`
 # commands an operator runs by hand; the JSON it writes is what `retectl compile`
 # will produce. It is deliberately *not* a subcommand of any shipped binary.
 #
@@ -37,17 +37,17 @@ RETES_DIR="$DEV_DIR/retes"
 CSR_DIR="$(mktemp -d)"
 trap 'rm -rf "$CSR_DIR"' EXIT
 
-echo "==> Building flor + florctl"
-cargo build --quiet --bin flor --bin florctl
+echo "==> Building flor + retectl"
+cargo build --quiet --bin flor --bin retectl
 FLOR="$ROOT/target/debug/flor"
-FLORCTL="$ROOT/target/debug/florctl"
+RETECTL="$ROOT/target/debug/retectl"
 
 echo "==> Resetting $DEV_DIR"
 rm -rf "$DEV_DIR"
 mkdir -p "$DEV_DIR"
 
 echo "==> Initialising rete CA for trust domain '$TRUST_DOMAIN'"
-"$FLORCTL" ca init \
+"$RETECTL" ca init \
   --trust-domain "$TRUST_DOMAIN" \
   --out-cert "$DEV_DIR/ca.crt" \
   --out-key "$DEV_DIR/ca.key"
@@ -73,7 +73,7 @@ mint() {
     "${scope_args[@]}" \
     --out-key "$root/$name.key" --out-csr "$csr"
 
-  "$FLORCTL" ca sign \
+  "$RETECTL" ca sign \
     --csr "$csr" --kind "$kind" --name "$name" "${scope_args[@]}" \
     --ca-cert "$DEV_DIR/ca.crt" --ca-key "$DEV_DIR/ca.key" \
     --out "$root/$name.crt"
@@ -108,7 +108,7 @@ cat >"$RETES_DIR/alpha/mgmt/vertices/flor.json" <<JSON
         "io": [ { "kind": "socks5", "listen": "127.0.0.1:1081" } ] }
     ],
     "links": [
-      { "type": "enum", "members": [
+      { "type": "list", "members": [
         { "name": "tcp-echo", "peer": "spiffe://$TRUST_DOMAIN/service/beta/tcp-echo", "via": { "type": "udp", "adapter": "wire", "addr": "127.0.0.1:31440" } }
       ] }
     ],

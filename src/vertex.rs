@@ -19,7 +19,7 @@ use error_stack::{Report, ResultExt, bail};
 use crate::config::artifact::model::vertex::{
     Adapter, Identity, IoChannel, LinkRule, VertexMgmtPayload, Via,
 };
-use crate::config::artifact::{Envelope, VertexKind};
+use crate::config::artifact::{Envelope, VertexKind, version};
 use crate::core::identity::{SpiffeId, X509Svid, load_bundle_from_pem, load_svid_from_pem};
 use crate::core::transport::{
     AddrMap, EndpointAddr, QuicConnector, QuicPublisher, TransportBundle, TrustBundle,
@@ -73,6 +73,15 @@ impl ConfigBundle {
         let bytes = std::fs::read(&path).change_context_lazy(|| {
             Error::new(format!("Failed to read vertex config {}", path.display()))
         })?;
+        // Gate on schema_version before the strict parse, so a newer additive
+        // minor reports a clear upgrade error rather than an unknown-field
+        // failure from the envelope's `deny_unknown_fields`.
+        version::precheck_schema_version(&bytes).change_context_lazy(|| {
+            Error::new(format!(
+                "Vertex artifact {} has an unsupported schema",
+                path.display()
+            ))
+        })?;
         let env: Envelope<VertexMgmtPayload> = serde_json::from_slice(&bytes)
             .change_context_lazy(|| Error::new(format!("Failed to parse {}", path.display())))?;
         env.validate(name).change_context_lazy(|| {
@@ -119,7 +128,7 @@ fn build_link_bundle(
 
     // Dial table: each udp link member's peer -> its wire address.
     let mut addr_map = HashMap::new();
-    for LinkRule::Enum { members } in &payload.links {
+    for LinkRule::List { members } in &payload.links {
         for member in members {
             if let Via::Udp { addr, .. } = &member.via {
                 addr_map.insert(member.peer.clone(), *addr);
@@ -136,9 +145,16 @@ fn build_link_bundle(
             match io {
                 IoChannel::Socks5 { listen } => socks5.push((svid.clone(), *listen)),
                 IoChannel::Tcp { upstream } => tcp.push((svid.clone(), *upstream)),
-                // FlorIO is the recursive bidirectional channel — it has no
-                // place in the inbound/outbound runtime, so it is not wired.
-                IoChannel::Florio { .. } => {}
+                // FlorIO is the recursive bidirectional channel: no C0 runtime
+                // wires it into the inbound/outbound path. Warn rather than skip
+                // silently so a mis-provisioned workload is visible until the C1
+                // FlorIO runtime lands.
+                IoChannel::Florio { socket } => log::warn!(
+                    "Workload {} declares a FlorIO io channel ({}); FlorIO is not \
+                     implemented in C0 and this channel is ignored",
+                    workload.spiffe_id,
+                    socket.display()
+                ),
             }
         }
     }
@@ -377,7 +393,7 @@ mod tests {
                           { "kind": "socks5", "listen": "127.0.0.1:18000" }
                       ] }
                 ],
-                "links": [ { "type": "enum", "members": [
+                "links": [ { "type": "list", "members": [
                     { "name": "mongodb", "peer": "spiffe://demo.flor/service/mongodb", "via": { "type": "udp", "adapter": "wire", "addr": "5.6.7.8:4433" } }
                 ] } ],
                 "egress": [ { "target": "spiffe://demo.flor/service/mongodb", "allow": ["spiffe://demo.flor/service/alpha/api"] } ]
@@ -427,7 +443,7 @@ mod tests {
                       "identity": { "cert_path": "alice.crt", "priv_path": "alice.key" },
                       "io": [ { "kind": "socks5", "listen": "127.0.0.1:1080" } ] }
                 ],
-                "links": [ { "type": "enum", "members": [
+                "links": [ { "type": "list", "members": [
                     { "name": "api", "peer": "spiffe://demo.flor/service/api", "via": { "type": "udp", "adapter": "wire", "addr": "1.2.3.4:4433" } }
                 ] } ]
             }),

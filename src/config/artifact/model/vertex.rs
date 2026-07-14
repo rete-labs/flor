@@ -62,6 +62,10 @@ impl Payload for VertexMgmtPayload {
 
 /// The local transport a vertex terminates. Internally tagged on `type`;
 /// unknown types fail closed.
+///
+/// Kept tagged (`{ "type": "quic" }`, not a bare `"quic"` string) so a transport
+/// can grow config — e.g. `{ "type": "quic", "idle_timeout": … }` — without a
+/// wire-format change, and so every variant-bearing node stays uniformly tagged.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TransportEndpoint {
@@ -157,8 +161,9 @@ pub enum Direction {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LinkRule {
-    /// An explicit enumeration of links.
-    Enum { members: Vec<LinkMember> },
+    /// An explicit list of links — the members are enumerated directly (as
+    /// opposed to a future pattern/rule-matched set).
+    List { members: Vec<LinkMember> },
 }
 
 /// A single link: a named handle to a peer over one adapter.
@@ -232,7 +237,7 @@ mod tests {
                 }
             ],
             "links": [
-                { "type": "enum", "members": [
+                { "type": "list", "members": [
                     { "name": "config-server", "peer": "spiffe://rete-lovers/service/config-server", "via": { "type": "udp", "adapter": "wire", "addr": "9.10.11.12:4433" } },
                     { "name": "api",           "peer": "spiffe://rete-lovers/service/api",           "via": { "type": "udp", "adapter": "wire", "addr": "1.2.3.4:4433" } },
                     { "name": "kafka",         "peer": "spiffe://rete-lovers/service/kafka",         "via": { "type": "udp", "adapter": "wire", "addr": "5.6.7.8:4433" } }
@@ -278,7 +283,7 @@ mod tests {
                 { "target": "spiffe://rete-lovers/service/alpha/ssh", "allow": ["spiffe://rete-lovers/user/bob"] }
             ],
             "links": [
-                { "type": "enum", "members": [
+                { "type": "list", "members": [
                     { "name": "config-server", "peer": "spiffe://rete-lovers/service/config-server", "via": { "type": "udp", "adapter": "wire", "addr": "9.10.11.12:4433" } },
                     { "name": "mongodb",       "peer": "spiffe://rete-lovers/service/mongodb",       "via": { "type": "udp", "adapter": "wire", "addr": "5.6.7.8:4433" } }
                 ] }
@@ -324,7 +329,7 @@ mod tests {
 
         // One enum link rule with three members.
         assert_eq!(p.links.len(), 1);
-        let LinkRule::Enum { members } = &p.links[0];
+        let LinkRule::List { members } = &p.links[0];
         assert_eq!(members.len(), 3);
         assert_eq!(members[0].name, "config-server");
         assert_eq!(
@@ -407,7 +412,7 @@ mod tests {
             "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "0.0.0.0:4433" } ] },
             "workloads": [],
             "links": [
-                { "type": "enum", "members": [
+                { "type": "list", "members": [
                     { "name": "beta", "peer": "spiffe://rete-lovers/vertex/beta/rete", "via": { "type": "udp", "adapter": "wire", "addr": "10.0.0.7:5544" } }
                 ] }
             ]
@@ -432,7 +437,7 @@ mod tests {
                   "io": [ { "kind": "florio", "socket": "/run/wl.sock" } ] }
             ],
             "links": [
-                { "type": "enum", "members": [
+                { "type": "list", "members": [
                     { "name": "beta", "peer": "spiffe://rete-lovers/vertex/beta/rete", "via": { "type": "florio", "adapter": "io" } }
                 ] }
             ]
@@ -447,7 +452,7 @@ mod tests {
         }
         assert_eq!(p.workloads[0].io[0].direction(), Direction::Bidirectional);
         // FlorIO link carries no wire address.
-        let LinkRule::Enum { members } = &p.links[0];
+        let LinkRule::List { members } = &p.links[0];
         assert_eq!(
             members[0].via,
             Via::Florio {

@@ -20,10 +20,17 @@ use crate::core::identity::SpiffeId;
 
 /// A signed compiled artifact: flat claims beside a typed `payload`.
 ///
-/// A closed, `schema_version`-gated metadata schema: every claim is enumerated
-/// and unknown fields are rejected, so a typo or a newer producer's added claim
-/// fails loudly rather than parsing silently. Evolving the schema is a
-/// `schema_version` bump plus an explicit field, never an open field bag.
+/// A closed metadata schema: every claim is enumerated and unknown fields are
+/// rejected, so a typo or stray claim fails loudly rather than parsing silently.
+/// The schema evolves by a `schema_version` bump plus an explicit field, never
+/// an open field bag.
+///
+/// Deserializing an `Envelope` does **not** by itself gate `schema_version`. For
+/// the recommended fail-closed loading path, call
+/// [`version::precheck_schema_version`](super::super::version::precheck_schema_version)
+/// on the raw bytes *before* parsing — so an unsupported version reports a clear
+/// "upgrade flor" error rather than a bare unknown-field failure — then call
+/// `Envelope::validate` after parsing to re-check the version and the payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Envelope<P> {
