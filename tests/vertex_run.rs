@@ -170,7 +170,7 @@ async fn link_vertex_relays_socks5_to_tcp_echo() {
                   "identity": { "cert_path": "alice.crt", "priv_path": "alice.key" },
                   "io": [ { "kind": "socks5", "listen": ALPHA_SOCKS5 } ] }
             ],
-            "links": [ { "type": "enum", "members": [
+            "links": [ { "type": "list", "members": [
                 { "name": "tcp-echo", "peer": "spiffe://demo.flor/service/beta/tcp-echo", "via": { "type": "udp", "adapter": "wire", "addr": BETA_QUIC } }
             ] } ],
             "egress": [ { "target": "spiffe://demo.flor/service/beta/tcp-echo", "allow": ["spiffe://demo.flor/user/alice"] } ]

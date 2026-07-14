@@ -8,6 +8,13 @@
 //! (generic over the payload's declared [`Payload`] cell), then runs that
 //! payload's own rules via [`ValidatePayload`]. The envelope check is written
 //! once on [`Envelope`]; each payload implements only `validate_payload`.
+//!
+//! This is **currently fail-fast**: it returns on the first problem. That is
+//! enough for the consumer-side gate (flor loading an artifact the operator
+//! already ran through `retectl validate`, and which — per ADR-0011 — the agent
+//! has vouched for): its job here is a go/no-go decision, not the authoring UX.
+//! Collecting and reporting *all* problems at once (as `retectl validate` does)
+//! is a planned improvement — tracked in #53.
 
 use error_stack::{Report, ResultExt, bail};
 
@@ -16,6 +23,7 @@ use crate::core::identity::{Dialable, SpiffeId};
 use super::Error;
 use super::model::vertex::{Adapter, LinkRule, VertexKind, VertexMgmtPayload, Via};
 use super::model::{Envelope, Payload};
+use super::version;
 
 /// A payload's own semantic rules, run after the generic envelope checks.
 /// Implemented per payload type; the shared entry point is [`Envelope::validate`].
@@ -49,12 +57,9 @@ fn validate_envelope<P: Payload>(
     env: &Envelope<P>,
     expected_name: &str,
 ) -> Result<(), Report<Error>> {
-    if env.schema_version != "1.0" {
-        bail!(Error::new(format!(
-            "Unsupported schema_version {:?}; expected \"1.0\"",
-            env.schema_version
-        )));
-    }
+    // Fail-closed major.minor gate (see `version`): accept older-or-equal minors
+    // within the known major, reject a different major or a newer minor.
+    version::ensure_supported(&env.schema_version)?;
     if env.plane.tag() != P::PLANE {
         bail!(Error::new(format!(
             "Artifact is on the {:?} plane, expected {:?}",
@@ -94,7 +99,7 @@ fn validate_vertex_common(payload: &VertexMgmtPayload) -> Result<(), Report<Erro
     }
 
     let adapters = &payload.connection_manager.adapters;
-    for LinkRule::Enum { members } in &payload.links {
+    for LinkRule::List { members } in &payload.links {
         for member in members {
             let adapter = adapters
                 .iter()
@@ -135,7 +140,7 @@ fn validate_single_trust_domain(payload: &VertexMgmtPayload) -> Result<(), Repor
     let link_ids = payload
         .links
         .iter()
-        .flat_map(|LinkRule::Enum { members }| members.iter().map(|m| &m.peer));
+        .flat_map(|LinkRule::List { members }| members.iter().map(|m| &m.peer));
     let mut ids = payload
         .workloads
         .iter()
@@ -175,7 +180,7 @@ fn validate_vertex_link(payload: &VertexMgmtPayload) -> Result<(), Report<Error>
     let link_peers: Vec<&SpiffeId> = payload
         .links
         .iter()
-        .flat_map(|LinkRule::Enum { members }| members.iter().map(|m| &m.peer))
+        .flat_map(|LinkRule::List { members }| members.iter().map(|m| &m.peer))
         .collect();
     for acl in &payload.egress {
         if !link_peers.iter().any(|peer| **peer == acl.target) {
@@ -217,7 +222,7 @@ mod tests {
                 }
             ],
             "links": [
-                { "type": "enum", "members": [
+                { "type": "list", "members": [
                     { "name": "mongodb", "peer": "spiffe://demo.flor/service/mongodb", "via": { "type": "udp", "adapter": "wire", "addr": "5.6.7.8:4433" } }
                 ] }
             ],
@@ -397,7 +402,7 @@ mod tests {
             "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "0.0.0.0:4433" } ] },
             "workloads": [],
             "links": [
-                { "type": "enum", "members": [
+                { "type": "list", "members": [
                     { "name": "beta", "peer": "spiffe://demo.flor/vertex/beta/rete", "via": { "type": "udp", "adapter": "wire", "addr": "10.0.0.7:5544" } }
                 ] }
             ]
@@ -415,7 +420,7 @@ mod tests {
             "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "0.0.0.0:4433" } ] },
             "workloads": [],
             "links": [
-                { "type": "enum", "members": [
+                { "type": "list", "members": [
                     { "name": "beta", "peer": "spiffe://demo.flor/vertex/beta/rete", "via": { "type": "florio", "adapter": "wire" } }
                 ] }
             ]

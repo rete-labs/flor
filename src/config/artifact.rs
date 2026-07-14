@@ -12,6 +12,7 @@
 
 pub mod model;
 pub mod validate;
+pub mod version;
 
 pub use model::{
     ArtifactKind, Envelope, Payload, Plane, PlaneTag, Signature, VertexKind, VertexMgmtPayload,
