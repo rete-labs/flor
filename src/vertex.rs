@@ -73,17 +73,25 @@ impl ConfigBundle {
         let bytes = std::fs::read(&path).change_context_lazy(|| {
             Error::new(format!("Failed to read vertex config {}", path.display()))
         })?;
-        // Gate on schema_version before the strict parse, so a newer additive
-        // minor reports a clear upgrade error rather than an unknown-field
-        // failure from the envelope's `deny_unknown_fields`.
-        version::precheck_schema_version(&bytes).change_context_lazy(|| {
-            Error::new(format!(
-                "Vertex artifact {} has an unsupported schema",
-                path.display()
-            ))
-        })?;
-        let env: Envelope<VertexMgmtPayload> = serde_json::from_slice(&bytes)
-            .change_context_lazy(|| Error::new(format!("Failed to parse {}", path.display())))?;
+        // Strict typed parse on the happy path — one JSON pass. Only when it
+        // fails do we diagnose *why*: `precheck_schema_version` distinguishes
+        // version skew (a newer, unsupported schema whose added field/variant our
+        // strict types reject → an actionable upgrade error) from an artifact
+        // that is genuinely malformed for a supported version (preserve the parse
+        // error — it signals a mis-stamped or corrupt artifact, not skew).
+        let env: Envelope<VertexMgmtPayload> = match serde_json::from_slice(&bytes) {
+            Ok(env) => env,
+            Err(parse_err) => {
+                version::precheck_schema_version(&bytes).change_context_lazy(|| {
+                    Error::new(format!(
+                        "Vertex artifact {} has an unsupported schema",
+                        path.display()
+                    ))
+                })?;
+                return Err(Report::new(parse_err)
+                    .change_context(Error::new(format!("Failed to parse {}", path.display()))));
+            }
+        };
         env.validate(name).change_context_lazy(|| {
             Error::new(format!(
                 "Vertex artifact {} failed validation",
@@ -347,9 +355,17 @@ mod tests {
         })
     }
 
-    /// Write a mgmt vertex artifact wrapping `payload` to `mgmt/vertices/flor.json`.
-    fn write_artifact(root: &Path, payload: Value) {
-        let env = json!({
+    /// Write a full envelope `Value` to `mgmt/vertices/flor.json`, letting a test
+    /// set `schema_version` and inject unknown claims the wrapping helper can't.
+    fn write_envelope(root: &Path, env: Value) {
+        let dir = root.join("mgmt/vertices");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("flor.json"), serde_json::to_vec(&env).unwrap()).unwrap();
+    }
+
+    /// A well-formed 1.0 mgmt vertex envelope wrapping `payload`.
+    fn envelope_1_0(payload: Value) -> Value {
+        json!({
             "schema_version": "1.0",
             "plane": "mgmt",
             "kind": "vertex",
@@ -359,10 +375,12 @@ mod tests {
             "generated_at": "2026-01-01T00:00:00Z",
             "payload": payload,
             "signature": { "alg": "none", "key_id": "spiffe://demo.flor/management-plane/dev", "value": "x" }
-        });
-        let dir = root.join("mgmt/vertices");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("flor.json"), serde_json::to_vec(&env).unwrap()).unwrap();
+        })
+    }
+
+    /// Write a mgmt vertex artifact wrapping `payload` to `mgmt/vertices/flor.json`.
+    fn write_artifact(root: &Path, payload: Value) {
+        write_envelope(root, envelope_1_0(payload));
     }
 
     #[test]
@@ -700,5 +718,67 @@ mod tests {
             panic!("expected a validation error");
         };
         assert!(format!("{err:?}").contains("io channels"), "{err:?}");
+    }
+
+    #[test]
+    fn load_reports_upgrade_for_newer_minor_with_unknown_envelope_field() {
+        // A 1.1 producer added an envelope claim our strict schema rejects. The
+        // load must report an actionable upgrade error, not a serde unknown-field.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let mut env = envelope_1_0(one_workload_link());
+        env["schema_version"] = json!("1.1");
+        env["future_claim"] = json!(true);
+        write_envelope(root, env);
+
+        let Err(err) = ConfigBundle::load(root, "flor") else {
+            panic!("expected an unsupported-schema error");
+        };
+        let msg = format!("{err:?}");
+        assert!(msg.contains("unsupported schema"), "{msg}");
+        assert!(msg.contains("upgrade"), "{msg}");
+        assert!(!msg.contains("unknown field"), "leaked serde error: {msg}");
+    }
+
+    #[test]
+    fn load_reports_upgrade_for_newer_minor_with_unknown_payload_field() {
+        // Same, but the newer field is inside the payload (its own
+        // `deny_unknown_fields`) — the diagnosis must still be version skew.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let mut payload = one_workload_link();
+        payload["future_payload_field"] = json!(true);
+        let mut env = envelope_1_0(payload);
+        env["schema_version"] = json!("1.1");
+        write_envelope(root, env);
+
+        let Err(err) = ConfigBundle::load(root, "flor") else {
+            panic!("expected an unsupported-schema error");
+        };
+        let msg = format!("{err:?}");
+        assert!(msg.contains("upgrade"), "{msg}");
+        assert!(!msg.contains("unknown field"), "leaked serde error: {msg}");
+    }
+
+    #[test]
+    fn load_preserves_parse_error_for_unknown_field_at_supported_version() {
+        // Unknown claim at the *supported* version 1.0 → a mis-stamped or corrupt
+        // artifact, not version skew: the strict parse error must be preserved,
+        // not masked as an upgrade prompt.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let mut env = envelope_1_0(one_workload_link());
+        env["surprise"] = json!(true);
+        write_envelope(root, env);
+
+        let Err(err) = ConfigBundle::load(root, "flor") else {
+            panic!("expected a parse error");
+        };
+        let msg = format!("{err:?}");
+        assert!(msg.contains("Failed to parse"), "{msg}");
+        assert!(
+            !msg.contains("upgrade"),
+            "misreported as version skew: {msg}"
+        );
     }
 }

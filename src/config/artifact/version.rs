@@ -103,15 +103,12 @@ fn ensure_supported_against(
     Ok(())
 }
 
-/// A best-effort pre-parse screen of raw artifact bytes on their
-/// `schema_version`, run *before* the strict typed parse so an unsupported
-/// version reports a clear upgrade error instead of a `deny_unknown_fields`
-/// unknown-field failure when a newer minor adds fields.
+/// Extracts a `schema_version` from raw artifact bytes and, if one is present,
+/// checks it with [`ensure_supported`] — erroring on an unsupported version.
 ///
-/// It does **not** on its own *ensure* a supported version: if the bytes don't
-/// parse as JSON or omit `schema_version`, it returns `Ok` and defers to the
-/// strict parse for the precise structural error. Pair it with the parse and
-/// [`ensure_supported`] (via `Envelope::validate`), which is authoritative.
+/// Best-effort by design, so it does not on its own guarantee a supported
+/// version: if the bytes don't parse as JSON or carry no `schema_version`, it
+/// returns `Ok` rather than an error.
 pub fn precheck_schema_version(bytes: &[u8]) -> Result<(), Report<Error>> {
     #[derive(Deserialize)]
     struct Probe {

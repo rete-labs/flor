@@ -26,11 +26,12 @@ use crate::core::identity::SpiffeId;
 /// an open field bag.
 ///
 /// Deserializing an `Envelope` does **not** by itself gate `schema_version`. For
-/// the recommended fail-closed loading path, call
+/// the recommended fail-closed loading path: parse the bytes, then call
+/// `Envelope::validate` (the authoritative `schema_version` check plus the
+/// payload rules). If the strict parse itself *fails*, run
 /// [`version::precheck_schema_version`](super::super::version::precheck_schema_version)
-/// on the raw bytes *before* parsing — so an unsupported version reports a clear
-/// "upgrade flor" error rather than a bare unknown-field failure — then call
-/// `Envelope::validate` after parsing to re-check the version and the payload.
+/// on the bytes to tell an unsupported-schema artifact (report a clear "upgrade
+/// flor" error) apart from a malformed one (surface the parse error).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Envelope<P> {
