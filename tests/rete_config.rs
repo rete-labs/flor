@@ -8,7 +8,7 @@
 //! `RepoModel` directly. Here we catch bugs that unit tests cannot:
 //!   - serde field names and enum aliases (`kind: link`, `type: quic`)
 //!   - `deny_unknown_fields` rejecting typos in YAML
-//!   - null-body group deserialization (`config-read:` with no value)
+//!   - null-body group deserialization (`coordinator-sync:` with no value)
 //!   - glob-based file discovery, include/exclude patterns, skip rules
 //!   - duplicate key detection across files at merge time
 
@@ -71,24 +71,24 @@ nodes:
         address: "1.2.3.4:4433"
 
 services:
-  config-server:
+  coordinator:
     at: mgmt
     addr: "127.0.0.1:9000"
-    groups: [config-read]
-  config-publisher:
+    groups: [coordinator-sync]
+  coordinator-publisher:
     at: mgmt
     addr: "127.0.0.1:9001"
-    groups: [config-write]
+    groups: [coordinator-publish]
 
 groups:
-  config-read:
-  config-write:
+  coordinator-sync:
+  coordinator-publish:
 
 roles:
   node:
-    allow: [config-read]
+    allow: [coordinator-sync]
   operator:
-    allow: [config-write]
+    allow: [coordinator-publish]
 
 users:
   alice:
@@ -416,22 +416,22 @@ nodes:
         type: quic
         address: "1.2.3.4:4433"
 services:
-  config-server:
+  coordinator:
     at: mgmt
     addr: "127.0.0.1:9000"
-    groups: [config-read]
-  config-publisher:
+    groups: [coordinator-sync]
+  coordinator-publisher:
     at: mgmt
     addr: "127.0.0.1:9001"
-    groups: [config-write]
+    groups: [coordinator-publish]
 groups:
-  config-read:
-  config-write:
+  coordinator-sync:
+  coordinator-publish:
 roles:
   node:
-    allow: [config-read]
+    allow: [coordinator-sync]
   operator:
-    allow: [config-write]
+    allow: [coordinator-publish]
 users:
   alice:
     roles: [operator]
@@ -474,22 +474,22 @@ rete:
     mgmt:
       keys: []
 services:
-  config-server:
+  coordinator:
     at: mgmt
     addr: "127.0.0.1:9000"
-    groups: [config-read]
-  config-publisher:
+    groups: [coordinator-sync]
+  coordinator-publisher:
     at: mgmt
     addr: "127.0.0.1:9001"
-    groups: [config-write]
+    groups: [coordinator-publish]
 groups:
-  config-read:
-  config-write:
+  coordinator-sync:
+  coordinator-publish:
 roles:
   node:
-    allow: [config-read]
+    allow: [coordinator-sync]
   operator:
-    allow: [config-write]
+    allow: [coordinator-publish]
 users:
   alice:
     roles: [operator]
@@ -541,7 +541,7 @@ fn valid_minimal_config_end_to_end() {
 }
 
 #[test]
-fn missing_config_server_service_triggers_management_node_integrity() {
+fn missing_coordinator_service_triggers_management_node_integrity() {
     let dir = TempDir::new().unwrap();
     write(
         &dir,
@@ -562,18 +562,18 @@ nodes:
         type: quic
         address: "1.2.3.4:4433"
 services:
-  config-publisher:
+  coordinator-publisher:
     at: mgmt
     addr: "127.0.0.1:9001"
-    groups: [config-write]
+    groups: [coordinator-publish]
 groups:
-  config-read:
-  config-write:
+  coordinator-sync:
+  coordinator-publish:
 roles:
   node:
-    allow: [config-read]
+    allow: [coordinator-sync]
   operator:
-    allow: [config-write]
+    allow: [coordinator-publish]
 users:
   alice:
     roles: [operator]
@@ -588,8 +588,8 @@ users:
     assert!(
         violations
             .iter()
-            .any(|v| v.rule == Rule::ManagementNodeIntegrity && v.message.contains("config-server")),
-        "violation message should name 'config-server'"
+            .any(|v| v.rule == Rule::ManagementNodeIntegrity && v.message.contains("coordinator")),
+        "violation message should name 'coordinator'"
     );
 }
 
@@ -615,22 +615,22 @@ nodes:
         type: quic
         address: "1.2.3.4:4433"
 services:
-  config-server:
+  coordinator:
     at: mgmt
     addr: "127.0.0.1:9000"
-    groups: [config-read]
-  config-publisher:
+    groups: [coordinator-sync]
+  coordinator-publisher:
     at: mgmt
     addr: "127.0.0.1:9001"
-    groups: [config-write]
+    groups: [coordinator-publish]
 groups:
-  config-read:
-  config-write:
+  coordinator-sync:
+  coordinator-publish:
 roles:
   node:
-    allow: [config-read]
+    allow: [coordinator-sync]
   operator:
-    allow: [config-write]
+    allow: [coordinator-publish]
 users:
   alice:
     roles: []
@@ -667,25 +667,25 @@ nodes:
         type: quic
         address: "1.2.3.4:4433"
 services:
-  config-server:
+  coordinator:
     at: mgmt
     addr: "127.0.0.1:9000"
-    groups: [config-read]
-  config-publisher:
+    groups: [coordinator-sync]
+  coordinator-publisher:
     at: mgmt
     addr: "127.0.0.1:9001"
-    groups: [config-write]
+    groups: [coordinator-publish]
   my-app:
     at: ghost-node
     addr: "127.0.0.1:8080"
 groups:
-  config-read:
-  config-write:
+  coordinator-sync:
+  coordinator-publish:
 roles:
   node:
-    allow: [config-read]
+    allow: [coordinator-sync]
   operator:
-    allow: [config-write]
+    allow: [coordinator-publish]
 users:
   alice:
     roles: [operator]
@@ -728,26 +728,26 @@ nodes:
         type: quic
         address: "1.2.3.4:4433"
 services:
-  config-server:
+  coordinator:
     at: mgmt
     addr: "127.0.0.1:9000"
-    groups: [config-read]
-  config-publisher:
+    groups: [coordinator-sync]
+  coordinator-publisher:
     at: mgmt
     addr: "127.0.0.1:9001"
-    groups: [config-write]
+    groups: [coordinator-publish]
   client-app:
     at: mgmt
     addr: "127.0.0.1:8080"
     socks5_proxy: "127.0.0.1:1080"
 groups:
-  config-read:
-  config-write:
+  coordinator-sync:
+  coordinator-publish:
 roles:
   node:
-    allow: [config-read]
+    allow: [coordinator-sync]
   operator:
-    allow: [config-write]
+    allow: [coordinator-publish]
 users:
   alice:
     roles: [operator]
@@ -788,22 +788,22 @@ nodes:
         kind: link
         type: quic
 groups:
-  config-read:
-  config-write:
+  coordinator-sync:
+  coordinator-publish:
 services:
-  config-server:
+  coordinator:
     at: mgmt
     addr: "127.0.0.1:9000"
-    groups: [config-read]
-  config-publisher:
+    groups: [coordinator-sync]
+  coordinator-publisher:
     at: mgmt
     addr: "127.0.0.1:9001"
-    groups: [config-write]
+    groups: [coordinator-publish]
 roles:
   node:
-    allow: [config-read]
+    allow: [coordinator-sync]
   operator:
-    allow: [config-write]
+    allow: [coordinator-publish]
 users:
   alice:
     roles: [operator]
@@ -848,24 +848,24 @@ nodes:
         kind: mesh
         type: udp
 services:
-  config-server:
+  coordinator:
     at: mgmt
     via: quic0
     addr: "127.0.0.1:9000"
-    groups: [config-read]
-  config-publisher:
+    groups: [coordinator-sync]
+  coordinator-publisher:
     at: mgmt
     via: quic0
     addr: "127.0.0.1:9001"
-    groups: [config-write]
+    groups: [coordinator-publish]
 groups:
-  config-read:
-  config-write:
+  coordinator-sync:
+  coordinator-publish:
 roles:
   node:
-    allow: [config-read]
+    allow: [coordinator-sync]
   operator:
-    allow: [config-write]
+    allow: [coordinator-publish]
 users:
   alice:
     roles: [operator]
@@ -912,14 +912,14 @@ nodes:
         type: quic
         address: "1.2.3.4:4433"
 services:
-  config-server:
+  coordinator:
     at: mgmt
     addr: "127.0.0.1:9000"
-    groups: [config-read]
-  config-publisher:
+    groups: [coordinator-sync]
+  coordinator-publisher:
     at: mgmt
     addr: "127.0.0.1:9001"
-    groups: [config-write]
+    groups: [coordinator-publish]
 "#,
     );
     write(
@@ -927,13 +927,13 @@ services:
         "access/roles.yaml",
         r#"
 groups:
-  config-read:
-  config-write:
+  coordinator-sync:
+  coordinator-publish:
 roles:
   node:
-    allow: [config-read]
+    allow: [coordinator-sync]
   operator:
-    allow: [config-write]
+    allow: [coordinator-publish]
 "#,
     );
     write(
@@ -983,22 +983,22 @@ nodes:
         type: quic
         address: "1.2.3.4:4433"
 services:
-  config-server:
+  coordinator:
     at: mgmt
     addr: "127.0.0.1:9000"
-    groups: [config-read]
-  config-publisher:
+    groups: [coordinator-sync]
+  coordinator-publisher:
     at: mgmt
     addr: "127.0.0.1:9001"
-    groups: [config-write]
+    groups: [coordinator-publish]
 groups:
-  config-read:
-  config-write:
+  coordinator-sync:
+  coordinator-publish:
 roles:
   node:
-    allow: [config-read]
+    allow: [coordinator-sync]
   operator:
-    allow: [config-write]
+    allow: [coordinator-publish]
   fancy:
     allow: [ghost-group]
 users:

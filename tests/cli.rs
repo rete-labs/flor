@@ -33,24 +33,24 @@ nodes:
         address: "1.2.3.4:4433"
 
 services:
-  config-server:
+  coordinator:
     at: mgmt
     addr: "127.0.0.1:9000"
-    groups: [config-read]
-  config-publisher:
+    groups: [coordinator-sync]
+  coordinator-publisher:
     at: mgmt
     addr: "127.0.0.1:9001"
-    groups: [config-write]
+    groups: [coordinator-publish]
 
 groups:
-  config-read:
-  config-write:
+  coordinator-sync:
+  coordinator-publish:
 
 roles:
   node:
-    allow: [config-read]
+    allow: [coordinator-sync]
   operator:
-    allow: [config-write]
+    allow: [coordinator-publish]
 
 users:
   alice:
@@ -282,7 +282,7 @@ fn validate_exits_zero_and_prints_ok_on_valid_config() {
 #[test]
 fn validate_exits_nonzero_and_reports_violation_on_invalid_config() {
     let dir = tempfile::tempdir().unwrap();
-    // Missing config-server → ManagementNodeIntegrity violation
+    // Missing coordinator → ManagementNodeIntegrity violation
     std::fs::write(
         dir.path().join("rete.yaml"),
         r#"
@@ -303,20 +303,20 @@ nodes:
         address: "1.2.3.4:4433"
 
 services:
-  config-publisher:
+  coordinator-publisher:
     at: mgmt
     addr: "127.0.0.1:9001"
-    groups: [config-write]
+    groups: [coordinator-publish]
 
 groups:
-  config-read:
-  config-write:
+  coordinator-sync:
+  coordinator-publish:
 
 roles:
   node:
-    allow: [config-read]
+    allow: [coordinator-sync]
   operator:
-    allow: [config-write]
+    allow: [coordinator-publish]
 
 users:
   alice:
