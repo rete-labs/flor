@@ -10,10 +10,10 @@ use std::fmt;
 
 use super::model::{RepoModel, VertexKind, VertexType};
 
-const SVC_CONFIG_SERVER: &str = "config-server";
-const SVC_CONFIG_PUBLISHER: &str = "config-publisher";
-const GROUP_CONFIG_READ: &str = "config-read";
-const GROUP_CONFIG_WRITE: &str = "config-write";
+const SVC_COORDINATOR: &str = "coordinator";
+const SVC_COORDINATOR_PUBLISHER: &str = "coordinator-publisher";
+const GROUP_COORDINATOR_SYNC: &str = "coordinator-sync";
+const GROUP_COORDINATOR_PUBLISH: &str = "coordinator-publish";
 const ROLE_NODE: &str = "node";
 const ROLE_OPERATOR: &str = "operator";
 
@@ -32,7 +32,7 @@ pub enum Rule {
     PrincipalRegistry,
     /// Every service's `at` field names a known node.
     ServicePlacement,
-    /// Config-server and config-publisher coexist on one reachable mgmt node.
+    /// Coordinator and coordinator-publisher coexist on one reachable mgmt node.
     ManagementNodeIntegrity,
     /// Reserved roles and groups are present with canonical definitions.
     ReservedNameProtection,
@@ -202,41 +202,41 @@ fn check_service_placement(model: &RepoModel, out: &mut Vec<Violation>) {
 // ---------------------------------------------------------------------------
 
 fn check_management_node_integrity(model: &RepoModel, out: &mut Vec<Violation>) {
-    let config_server = model.services.get(SVC_CONFIG_SERVER);
-    let config_publisher = model.services.get(SVC_CONFIG_PUBLISHER);
+    let coordinator = model.services.get(SVC_COORDINATOR);
+    let coordinator_publisher = model.services.get(SVC_COORDINATOR_PUBLISHER);
 
-    if config_server.is_none() {
+    if coordinator.is_none() {
         out.push(Violation {
             rule: Rule::ManagementNodeIntegrity,
-            message: format!("Service '{SVC_CONFIG_SERVER}' is missing"),
+            message: format!("Service '{SVC_COORDINATOR}' is missing"),
         });
     }
-    if config_publisher.is_none() {
+    if coordinator_publisher.is_none() {
         out.push(Violation {
             rule: Rule::ManagementNodeIntegrity,
-            message: format!("Service '{SVC_CONFIG_PUBLISHER}' is missing"),
+            message: format!("Service '{SVC_COORDINATOR_PUBLISHER}' is missing"),
         });
     }
-    let (Some(cs), Some(cp)) = (config_server, config_publisher) else {
+    let (Some(cs), Some(cp)) = (coordinator, coordinator_publisher) else {
         return;
     };
 
-    // config-server must be in config-read group
-    if !cs.groups.iter().any(|g| g == GROUP_CONFIG_READ) {
+    // coordinator must be in coordinator-sync group
+    if !cs.groups.iter().any(|g| g == GROUP_COORDINATOR_SYNC) {
         out.push(Violation {
             rule: Rule::ManagementNodeIntegrity,
             message: format!(
-                "Service '{SVC_CONFIG_SERVER}' must belong to group '{GROUP_CONFIG_READ}'"
+                "Service '{SVC_COORDINATOR}' must belong to group '{GROUP_COORDINATOR_SYNC}'"
             ),
         });
     }
 
-    // config-publisher must be in config-write group
-    if !cp.groups.iter().any(|g| g == GROUP_CONFIG_WRITE) {
+    // coordinator-publisher must be in coordinator-publish group
+    if !cp.groups.iter().any(|g| g == GROUP_COORDINATOR_PUBLISH) {
         out.push(Violation {
             rule: Rule::ManagementNodeIntegrity,
             message: format!(
-                "Service '{SVC_CONFIG_PUBLISHER}' must belong to group '{GROUP_CONFIG_WRITE}'"
+                "Service '{SVC_COORDINATOR_PUBLISHER}' must belong to group '{GROUP_COORDINATOR_PUBLISH}'"
             ),
         });
     }
@@ -246,7 +246,7 @@ fn check_management_node_integrity(model: &RepoModel, out: &mut Vec<Violation>) 
         out.push(Violation {
             rule: Rule::ManagementNodeIntegrity,
             message: format!(
-                "Config-server is on node '{}' but config-publisher is on node '{}'; \
+                "Coordinator is on node '{}' but coordinator-publisher is on node '{}'; \
                  both must be on the same management node",
                 cs.at, cp.at
             ),
@@ -293,11 +293,11 @@ fn check_reserved_name_protection(model: &RepoModel, out: &mut Vec<Violation>) {
             message: format!("Reserved role '{ROLE_NODE}' is missing"),
         }),
         Some(def) => {
-            if def.allow != [GROUP_CONFIG_READ] {
+            if def.allow != [GROUP_COORDINATOR_SYNC] {
                 out.push(Violation {
                     rule: Rule::ReservedNameProtection,
                     message: format!(
-                        "Reserved role '{ROLE_NODE}' must have `allow: [{GROUP_CONFIG_READ}]`, \
+                        "Reserved role '{ROLE_NODE}' must have `allow: [{GROUP_COORDINATOR_SYNC}]`, \
                          got: {:?}",
                         def.allow
                     ),
@@ -312,11 +312,11 @@ fn check_reserved_name_protection(model: &RepoModel, out: &mut Vec<Violation>) {
             message: format!("Reserved role '{ROLE_OPERATOR}' is missing"),
         }),
         Some(def) => {
-            if def.allow != [GROUP_CONFIG_WRITE] {
+            if def.allow != [GROUP_COORDINATOR_PUBLISH] {
                 out.push(Violation {
                     rule: Rule::ReservedNameProtection,
                     message: format!(
-                        "Reserved role '{ROLE_OPERATOR}' must have `allow: [{GROUP_CONFIG_WRITE}]`, \
+                        "Reserved role '{ROLE_OPERATOR}' must have `allow: [{GROUP_COORDINATOR_PUBLISH}]`, \
                          got: {:?}",
                         def.allow
                     ),
@@ -326,16 +326,16 @@ fn check_reserved_name_protection(model: &RepoModel, out: &mut Vec<Violation>) {
     }
 
     // Reserved groups
-    if !model.groups.contains_key(GROUP_CONFIG_READ) {
+    if !model.groups.contains_key(GROUP_COORDINATOR_SYNC) {
         out.push(Violation {
             rule: Rule::ReservedNameProtection,
-            message: format!("Reserved group '{GROUP_CONFIG_READ}' is missing"),
+            message: format!("Reserved group '{GROUP_COORDINATOR_SYNC}' is missing"),
         });
     }
-    if !model.groups.contains_key(GROUP_CONFIG_WRITE) {
+    if !model.groups.contains_key(GROUP_COORDINATOR_PUBLISH) {
         out.push(Violation {
             rule: Rule::ReservedNameProtection,
-            message: format!("Reserved group '{GROUP_CONFIG_WRITE}' is missing"),
+            message: format!("Reserved group '{GROUP_COORDINATOR_PUBLISH}' is missing"),
         });
     }
 }
@@ -366,7 +366,7 @@ fn check_operator_presence(model: &RepoModel, out: &mut Vec<Violation>) {
 
 fn check_vertex_graph_reachability(model: &RepoModel, out: &mut Vec<Violation>) {
     // Build the set of nodes that host at least one non-management workload service.
-    // Both config-read (config-server) and config-write (config-publisher) are management
+    // Both coordinator-sync (coordinator) and coordinator-publish (coordinator-publisher) are management
     // infrastructure; their node's address requirement is enforced by ManagementNodeIntegrity.
     let workload_nodes: std::collections::HashSet<&str> = model
         .services
@@ -374,7 +374,7 @@ fn check_vertex_graph_reachability(model: &RepoModel, out: &mut Vec<Violation>) 
         .filter(|svc| {
             !svc.groups
                 .iter()
-                .any(|g| g == GROUP_CONFIG_READ || g == GROUP_CONFIG_WRITE)
+                .any(|g| g == GROUP_COORDINATOR_SYNC || g == GROUP_COORDINATOR_PUBLISH)
         })
         .map(|svc| svc.at.as_str())
         .collect();
@@ -596,29 +596,29 @@ mod tests {
 
         let mut services = HashMap::new();
         services.insert(
-            "config-server".into(),
-            mgmt_service("mgmt", vec!["config-read"]),
+            "coordinator".into(),
+            mgmt_service("mgmt", vec!["coordinator-sync"]),
         );
         services.insert(
-            "config-publisher".into(),
-            mgmt_service("mgmt", vec!["config-write"]),
+            "coordinator-publisher".into(),
+            mgmt_service("mgmt", vec!["coordinator-publish"]),
         );
 
         let mut groups: HashMap<String, Option<Group>> = HashMap::new();
-        groups.insert("config-read".into(), None);
-        groups.insert("config-write".into(), None);
+        groups.insert("coordinator-sync".into(), None);
+        groups.insert("coordinator-publish".into(), None);
 
         let mut roles = HashMap::new();
         roles.insert(
             "node".into(),
             Role {
-                allow: vec!["config-read".into()],
+                allow: vec!["coordinator-sync".into()],
             },
         );
         roles.insert(
             "operator".into(),
             Role {
-                allow: vec!["config-write".into()],
+                allow: vec!["coordinator-publish".into()],
             },
         );
 
@@ -820,7 +820,7 @@ mod tests {
     fn principal_registry_service_node_name_collision() {
         let mut model = minimal_valid_model();
         model.nodes.insert(
-            "config-server".into(),
+            "coordinator".into(),
             node_with_quic_link("quic0", Some("5.6.7.8:4433")),
         );
         let violations = validate(&model);
@@ -828,7 +828,7 @@ mod tests {
         assert!(
             violations
                 .iter()
-                .any(|v| v.rule == Rule::PrincipalRegistry && v.message.contains("config-server"))
+                .any(|v| v.rule == Rule::PrincipalRegistry && v.message.contains("coordinator"))
         );
     }
 
@@ -868,36 +868,39 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn management_node_integrity_missing_config_server() {
+    fn management_node_integrity_missing_coordinator() {
         let mut model = minimal_valid_model();
-        model.services.remove("config-server");
-        let violations = validate(&model);
-        assert!(count(&violations, Rule::ManagementNodeIntegrity) >= 1);
-        assert!(violations.iter().any(
-            |v| v.rule == Rule::ManagementNodeIntegrity && v.message.contains("config-server")
-        ));
-    }
-
-    #[test]
-    fn management_node_integrity_missing_config_publisher() {
-        let mut model = minimal_valid_model();
-        model.services.remove("config-publisher");
+        model.services.remove("coordinator");
         let violations = validate(&model);
         assert!(count(&violations, Rule::ManagementNodeIntegrity) >= 1);
         assert!(
             violations
                 .iter()
                 .any(|v| v.rule == Rule::ManagementNodeIntegrity
-                    && v.message.contains("config-publisher"))
+                    && v.message.contains("coordinator"))
         );
     }
 
     #[test]
-    fn management_node_integrity_server_not_in_config_read_group() {
+    fn management_node_integrity_missing_coordinator_publisher() {
+        let mut model = minimal_valid_model();
+        model.services.remove("coordinator-publisher");
+        let violations = validate(&model);
+        assert!(count(&violations, Rule::ManagementNodeIntegrity) >= 1);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == Rule::ManagementNodeIntegrity
+                    && v.message.contains("coordinator-publisher"))
+        );
+    }
+
+    #[test]
+    fn management_node_integrity_server_not_in_coordinator_sync_group() {
         let mut model = minimal_valid_model();
         model
             .services
-            .insert("config-server".into(), mgmt_service("mgmt", vec![]));
+            .insert("coordinator".into(), mgmt_service("mgmt", vec![]));
         let violations = validate(&model);
         assert_eq!(count(&violations, Rule::ManagementNodeIntegrity), 1);
         assert!(
@@ -906,16 +909,16 @@ mod tests {
                 .find(|v| v.rule == Rule::ManagementNodeIntegrity)
                 .unwrap()
                 .message
-                .contains("config-read")
+                .contains("coordinator-sync")
         );
     }
 
     #[test]
-    fn management_node_integrity_publisher_not_in_config_write_group() {
+    fn management_node_integrity_publisher_not_in_coordinator_publish_group() {
         let mut model = minimal_valid_model();
         model
             .services
-            .insert("config-publisher".into(), mgmt_service("mgmt", vec![]));
+            .insert("coordinator-publisher".into(), mgmt_service("mgmt", vec![]));
         let violations = validate(&model);
         assert_eq!(count(&violations, Rule::ManagementNodeIntegrity), 1);
         assert!(
@@ -924,7 +927,7 @@ mod tests {
                 .find(|v| v.rule == Rule::ManagementNodeIntegrity)
                 .unwrap()
                 .message
-                .contains("config-write")
+                .contains("coordinator-publish")
         );
     }
 
@@ -936,8 +939,8 @@ mod tests {
             node_with_quic_link("quic0", Some("9.9.9.9:4433")),
         );
         model.services.insert(
-            "config-publisher".into(),
-            mgmt_service("other", vec!["config-write"]),
+            "coordinator-publisher".into(),
+            mgmt_service("other", vec!["coordinator-publish"]),
         );
         let violations = validate(&model);
         assert_eq!(count(&violations, Rule::ManagementNodeIntegrity), 1);
@@ -992,7 +995,7 @@ mod tests {
         model.roles.insert(
             "node".into(),
             Role {
-                allow: vec!["config-write".into()],
+                allow: vec!["coordinator-publish".into()],
             },
         );
         let violations = validate(&model);
@@ -1020,7 +1023,7 @@ mod tests {
         model.roles.insert(
             "operator".into(),
             Role {
-                allow: vec!["config-read".into()],
+                allow: vec!["coordinator-sync".into()],
             },
         );
         let violations = validate(&model);
@@ -1030,29 +1033,30 @@ mod tests {
     }
 
     #[test]
-    fn reserved_name_protection_missing_config_read_group() {
+    fn reserved_name_protection_missing_coordinator_sync_group() {
         let mut model = minimal_valid_model();
-        model.groups.remove("config-read");
-        let violations = validate(&model);
-        assert!(count(&violations, Rule::ReservedNameProtection) >= 1);
-        assert!(
-            violations.iter().any(
-                |v| v.rule == Rule::ReservedNameProtection && v.message.contains("config-read")
-            )
-        );
-    }
-
-    #[test]
-    fn reserved_name_protection_missing_config_write_group() {
-        let mut model = minimal_valid_model();
-        model.groups.remove("config-write");
+        model.groups.remove("coordinator-sync");
         let violations = validate(&model);
         assert!(count(&violations, Rule::ReservedNameProtection) >= 1);
         assert!(
             violations
                 .iter()
                 .any(|v| v.rule == Rule::ReservedNameProtection
-                    && v.message.contains("config-write"))
+                    && v.message.contains("coordinator-sync"))
+        );
+    }
+
+    #[test]
+    fn reserved_name_protection_missing_coordinator_publish_group() {
+        let mut model = minimal_valid_model();
+        model.groups.remove("coordinator-publish");
+        let violations = validate(&model);
+        assert!(count(&violations, Rule::ReservedNameProtection) >= 1);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == Rule::ReservedNameProtection
+                    && v.message.contains("coordinator-publish"))
         );
     }
 

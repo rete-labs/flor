@@ -238,13 +238,13 @@ mod tests {
             ],
             "links": [
                 { "type": "list", "members": [
-                    { "name": "config-server", "peer": "spiffe://rete-lovers/service/config-server", "via": { "type": "udp", "adapter": "wire", "addr": "9.10.11.12:4433" } },
+                    { "name": "coordinator", "peer": "spiffe://rete-lovers/service/coordinator", "via": { "type": "udp", "adapter": "wire", "addr": "9.10.11.12:4433" } },
                     { "name": "api",           "peer": "spiffe://rete-lovers/service/api",           "via": { "type": "udp", "adapter": "wire", "addr": "1.2.3.4:4433" } },
                     { "name": "kafka",         "peer": "spiffe://rete-lovers/service/kafka",         "via": { "type": "udp", "adapter": "wire", "addr": "5.6.7.8:4433" } }
                 ] }
             ],
             "egress": [
-                { "target": "spiffe://rete-lovers/service/config-server", "allow": ["spiffe://rete-lovers/node/alice-laptop"] },
+                { "target": "spiffe://rete-lovers/service/coordinator", "allow": ["spiffe://rete-lovers/node/alice-laptop"] },
                 { "target": "spiffe://rete-lovers/service/api",           "allow": ["spiffe://rete-lovers/user/alice"] },
                 { "target": "spiffe://rete-lovers/service/kafka",         "allow": ["spiffe://rete-lovers/user/alice"] }
             ]
@@ -284,12 +284,12 @@ mod tests {
             ],
             "links": [
                 { "type": "list", "members": [
-                    { "name": "config-server", "peer": "spiffe://rete-lovers/service/config-server", "via": { "type": "udp", "adapter": "wire", "addr": "9.10.11.12:4433" } },
+                    { "name": "coordinator", "peer": "spiffe://rete-lovers/service/coordinator", "via": { "type": "udp", "adapter": "wire", "addr": "9.10.11.12:4433" } },
                     { "name": "mongodb",       "peer": "spiffe://rete-lovers/service/mongodb",       "via": { "type": "udp", "adapter": "wire", "addr": "5.6.7.8:4433" } }
                 ] }
             ],
             "egress": [
-                { "target": "spiffe://rete-lovers/service/config-server", "allow": ["spiffe://rete-lovers/node/alpha"] },
+                { "target": "spiffe://rete-lovers/service/coordinator", "allow": ["spiffe://rete-lovers/node/alpha"] },
                 { "target": "spiffe://rete-lovers/service/mongodb",       "allow": ["spiffe://rete-lovers/service/api"] }
             ]
         })
@@ -331,10 +331,10 @@ mod tests {
         assert_eq!(p.links.len(), 1);
         let LinkRule::List { members } = &p.links[0];
         assert_eq!(members.len(), 3);
-        assert_eq!(members[0].name, "config-server");
+        assert_eq!(members[0].name, "coordinator");
         assert_eq!(
             members[0].peer.to_string(),
-            "spiffe://rete-lovers/service/config-server"
+            "spiffe://rete-lovers/service/coordinator"
         );
         match &members[0].via {
             Via::Udp { adapter, addr } => {
