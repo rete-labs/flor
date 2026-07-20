@@ -7,6 +7,9 @@
 //! coordinator consume.
 //! [`rete`] holds the configuration for the Rete network, including the nodes and
 //! their connections.
+//! [`compile`] is the bridge between them: the operator's compile step, which
+//! projects a validated [`rete`] source into per-node [`artifact`]s.
 
 pub mod artifact;
+pub mod compile;
 pub mod rete;
