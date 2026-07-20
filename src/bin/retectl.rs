@@ -8,12 +8,14 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use chrono::{SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand};
 use error_stack::{Report, ResultExt};
 
 use flor::{
     cli::{compact_chain, print_error, print_error_lines, write_secret},
-    config::rete::{LoadOpts, load, validate},
+    config::compile::{CompileOpts, compile, layout, version},
+    config::rete::{LoadOpts, RepoModel, load, validate},
     core::identity::{Ca, Kind, TrustDomain, build_id},
 };
 
@@ -37,6 +39,8 @@ enum Cmd {
     },
     /// Validate rete config: schema, cross-references, access consistency.
     Validate(ValidateArgs),
+    /// Compile rete config into per-node artifacts.
+    Compile(CompileArgs),
 }
 
 #[derive(Args, Debug)]
@@ -48,6 +52,21 @@ struct ValidateArgs {
     /// Override file discovery with explicit paths or globs (repeatable).
     #[arg(short, long = "file", value_name = "FILE")]
     files: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+struct CompileArgs {
+    /// Repository root directory.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+
+    /// Override file discovery with explicit paths or globs (repeatable).
+    #[arg(short, long = "file", value_name = "FILE")]
+    files: Vec<String>,
+
+    /// Where to write the compiled tree (default: `<repo>/.flor/compiled`).
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -123,55 +142,111 @@ fn main() {
     }
 
     if let Err(e) = run(cli.cmd) {
-        print_error(&e, DEBUG);
+        match e {
+            CmdError::Single(report) => print_error(&report, DEBUG),
+            CmdError::Many { stage, errors } => print_error_lines(&errors, stage),
+        }
         std::process::exit(1);
     }
 }
 
-fn run(cmd: Cmd) -> Result<(), Report<Error>> {
+/// How a command failed — one error, or a collected set of them.
+enum CmdError {
+    /// A single failure, reported as its causal chain.
+    Single(Report<Error>),
+    /// A stage that runs to completion and collects every failure it finds
+    /// (config load, validation), reported as a list. The `stage` names it in
+    /// the summary line; the errors are already rendered.
+    Many {
+        stage: &'static str,
+        errors: Vec<String>,
+    },
+}
+
+impl From<Report<Error>> for CmdError {
+    fn from(report: Report<Error>) -> Self {
+        CmdError::Single(report)
+    }
+}
+
+fn run(cmd: Cmd) -> Result<(), CmdError> {
     match cmd {
         Cmd::Ca { action } => match action {
             CaAction::Init(args) => ca_init(args),
             CaAction::Sign(args) => ca_sign(args),
         },
         Cmd::Validate(args) => cmd_validate(args),
+        Cmd::Compile(args) => cmd_compile(args),
     }
 }
 
-fn cmd_validate(args: ValidateArgs) -> Result<(), Report<Error>> {
-    let opts = LoadOpts {
-        repo: args.repo,
-        files: args.files,
+fn cmd_validate(args: ValidateArgs) -> Result<(), CmdError> {
+    load_valid_model(args.repo, args.files)?;
+    println!("ok");
+    Ok(())
+}
+
+/// `compile` writes artifacts an agent will act on, so it refuses anything
+/// `validate` would reject: same load, same rules, then the projection.
+fn cmd_compile(args: CompileArgs) -> Result<(), CmdError> {
+    let out = args
+        .out
+        .unwrap_or_else(|| args.repo.join(".flor").join("compiled"));
+    let model = load_valid_model(args.repo, args.files)?;
+
+    // Read the counter off the tree before the write clears it.
+    let opts = CompileOpts {
+        version: version::next_version(&out)
+            .change_context(Error("Failed to read the compiled version".into()))?,
+        generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
     };
 
-    let model = match load(&opts) {
-        Ok(model) => model,
-        Err(failures) => {
-            for f in &failures {
-                log::error!("{f:?}");
-            }
-            let lines: Vec<String> = failures.iter().map(compact_chain).collect();
-            print_error_lines(&lines, "load");
-            std::process::exit(1);
+    let artifacts =
+        compile(&model, &opts).change_context(Error("Failed to compile rete config".into()))?;
+    let written = layout::write(&out, &artifacts)
+        .change_context(Error("Failed to write the compiled tree".into()))?;
+
+    for path in &written {
+        println!("{}", path.display());
+    }
+    println!(
+        "Compiled {} node(s) at version {}",
+        artifacts.len(),
+        opts.version
+    );
+    Ok(())
+}
+
+/// Load the merged source and run the validator over it. The `Ok` model is one
+/// every rule accepted — the guarantee `compile` builds on.
+fn load_valid_model(repo: PathBuf, files: Vec<String>) -> Result<RepoModel, CmdError> {
+    let opts = LoadOpts { repo, files };
+
+    let model = load(&opts).map_err(|failures| {
+        for f in &failures {
+            log::error!("{f:?}");
         }
-    };
+        CmdError::Many {
+            stage: "load",
+            errors: failures.iter().map(compact_chain).collect(),
+        }
+    })?;
 
     let violations = validate(&model);
-
-    if violations.is_empty() {
-        println!("ok");
-        return Ok(());
+    if !violations.is_empty() {
+        return Err(CmdError::Many {
+            stage: "validation",
+            errors: violations
+                .iter()
+                .map(|v| format!("[{}] {}", v.rule, v.message))
+                .collect(),
+        });
     }
 
-    let lines: Vec<String> = violations
-        .iter()
-        .map(|v| format!("[{}] {}", v.rule, v.message))
-        .collect();
-    print_error_lines(&lines, "validation");
-    std::process::exit(1);
+    Ok(model)
 }
 
-fn ca_init(args: CaInitArgs) -> Result<(), Report<Error>> {
+fn ca_init(args: CaInitArgs) -> Result<(), CmdError> {
     let td = TrustDomain::new(&args.trust_domain)
         .change_context(Error("Invalid trust domain".into()))?;
     let ca =
@@ -188,7 +263,7 @@ fn ca_init(args: CaInitArgs) -> Result<(), Report<Error>> {
     Ok(())
 }
 
-fn ca_sign(args: CaSignArgs) -> Result<(), Report<Error>> {
+fn ca_sign(args: CaSignArgs) -> Result<(), CmdError> {
     let cert_pem_bytes = std::fs::read(&args.ca_cert)
         .change_context_lazy(|| Error(format!("Failed to read {}", args.ca_cert.display())))?;
     let key_pem_bytes = std::fs::read(&args.ca_key)

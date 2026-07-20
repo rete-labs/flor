@@ -5,6 +5,7 @@
 
 pub mod loader;
 pub mod model;
+pub mod reserved;
 pub mod validate;
 
 pub use loader::{LoadError, LoadOpts, load};

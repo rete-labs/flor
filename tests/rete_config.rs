@@ -872,6 +872,7 @@ users:
     nodes:
       - at: mgmt
         via: quic0
+        socks5_proxy: "127.0.0.1:1080"
 "#,
     );
     let model = load(&discovery(&dir)).unwrap();
@@ -947,6 +948,7 @@ users:
     roles: [node]
     nodes:
       - at: mgmt
+        socks5_proxy: "127.0.0.1:1080"
 "#,
     );
     let model = load(&discovery(&dir)).expect("multi-file config should load");

@@ -1,6 +1,8 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
+use std::net::SocketAddr;
+
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -21,4 +23,6 @@ pub struct UserNode {
     pub at: String,
     /// Vertex on that node (optional when node has exactly one vertex).
     pub via: Option<String>,
+    /// Loopback SOCKS5 port flor exposes for this device's outbound calls.
+    pub socks5_proxy: SocketAddr,
 }
