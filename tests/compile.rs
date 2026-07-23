@@ -100,7 +100,7 @@ fn compiles_every_node_into_the_documented_tree() {
         .success();
 
     let out = compiled(&dir);
-    let alpha = load_artifact(&out.join("alpha/mgmt/vertices/public.json"), "public");
+    let alpha = load_artifact(&out.join("alpha/mgmt/public.json"), "public");
     assert_eq!(alpha.node, "alpha");
     assert_eq!(alpha.version, 1);
 
@@ -128,17 +128,17 @@ fn compiles_every_node_into_the_documented_tree() {
     );
 
     // The user device is named for its own vertex, not a fixed filename.
-    let alice = load_artifact(&out.join("alice-laptop/mgmt/vertices/flor.json"), "flor");
+    let alice = load_artifact(&out.join("alice-laptop/mgmt/flor.json"), "flor");
     assert_eq!(alice.node, "alice-laptop");
 
-    load_artifact(&out.join("mgmt01/mgmt/vertices/public.json"), "public");
+    load_artifact(&out.join("mgmt01/mgmt/public.json"), "public");
 }
 
 #[test]
 fn version_advances_on_every_compile() {
     let dir = repo(RETE);
     let out = compiled(&dir);
-    let path = out.join("alpha/mgmt/vertices/public.json");
+    let path = out.join("alpha/mgmt/public.json");
 
     for expected in 1..=3 {
         retectl()
@@ -169,10 +169,7 @@ fn every_node_advances_to_the_same_version() {
             ("mgmt01", "public"),
             ("alice-laptop", "flor"),
         ] {
-            let path = out
-                .join(node)
-                .join("mgmt/vertices")
-                .join(format!("{vertex}.json"));
+            let path = out.join(node).join("mgmt").join(format!("{vertex}.json"));
             assert_eq!(load_artifact(&path, vertex).version, expected, "{node}");
         }
     }
@@ -204,7 +201,7 @@ fn a_node_dropped_from_the_source_stops_being_shipped() {
 
     assert!(!out.join("mgmt01").exists(), "stale node must be cleared");
     assert_eq!(
-        load_artifact(&out.join("alpha/mgmt/vertices/public.json"), "public").version,
+        load_artifact(&out.join("alpha/mgmt/public.json"), "public").version,
         2
     );
 }
@@ -222,10 +219,7 @@ fn out_override_writes_elsewhere() {
         .assert()
         .success();
 
-    load_artifact(
-        &out.path().join("alpha/mgmt/vertices/public.json"),
-        "public",
-    );
+    load_artifact(&out.path().join("alpha/mgmt/public.json"), "public");
     assert!(!compiled(&dir).exists());
 }
 
@@ -247,10 +241,7 @@ fn file_override_bypasses_discovery() {
         .assert()
         .success();
 
-    load_artifact(
-        &compiled(&dir).join("alpha/mgmt/vertices/public.json"),
-        "public",
-    );
+    load_artifact(&compiled(&dir).join("alpha/mgmt/public.json"), "public");
 }
 
 #[test]

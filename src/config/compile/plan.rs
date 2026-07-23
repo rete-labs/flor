@@ -4,14 +4,16 @@
 //! The resolved rete: everything the per-node projection needs, computed once.
 //!
 //! [`Plan::build`] does the work that is rete-wide rather than node-local —
-//! naming every principal and target with its SPIFFE ID, expanding roles to the
-//! groups they grant, resolving each service to the wire address that dials it,
-//! and allocating the local SOCKS5 ports the source never spells out. The
-//! per-node projection ([`super::vertex`]) then only filters and formats.
+//! naming every TLS principal and target with its SPIFFE ID, expanding roles to
+//! the groups they grant, and resolving each service to the wire address that
+//! dials it. Any local SOCKS5 listener is authored in the source, not allocated
+//! here. The per-node projection ([`super::vertex`]) then only filters and
+//! formats.
 //!
-//! Ordering is deliberate: the source model's collections are `HashMap`s, so
-//! every collection here is a `BTree*` or an explicitly sorted `Vec`. Same
-//! input, same output — the determinism the compile step promises.
+//! Ordering is deliberate: the source model's collections are `HashMap`s, whose
+//! iteration order is *not* stable, so every collection here is a `BTree*` or an
+//! explicitly sorted `Vec`. Same input, same output — the determinism the
+//! compile step promises.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -37,17 +39,18 @@ pub struct Plan {
     pub nodes: BTreeMap<String, NodePlan>,
     /// Every service as a dialable target, by service name.
     pub targets: BTreeMap<String, Target>,
-    /// Every principal in the rete, sorted by SPIFFE ID then by node.
+    /// Every TLS principal in the rete, sorted by SPIFFE ID then by node.
     ///
     /// A multi-device user contributes one entry per device node: same identity,
     /// different local io.
-    pub principals: Vec<Principal>,
+    pub tls_principals: Vec<TlsPrincipal>,
 }
 
 /// A node's link vertex — the one artifact C0 compiles per node.
 #[derive(Debug)]
 pub struct NodePlan {
-    /// The vertex's name in `nodes.yaml`; also the artifact's `name` and filename.
+    /// The link vertex's name; also the artifact's `name`, its filename, and the
+    /// `<name>` segment of the vertex's `vertex/<node>/<name>` SPIFFE ID.
     pub vertex_name: String,
     /// Where peers reach this node. `None` for initiator-only nodes (no
     /// `address` — laptops behind NAT).
@@ -71,9 +74,13 @@ impl NodePlan {
     }
 }
 
-/// A principal as wired into one node's vertex.
+/// A TLS principal resolved on one node: an entity that holds an SVID (cert+key)
+/// and terminates mTLS. Whether it acts as an initiator, a target, or both is a
+/// *role* its `io` channels give it — orthogonal to it being a principal. It is
+/// projected into a vertex artifact's `workloads`. See the identity doc's
+/// [types of principal](https://florete.tech/docs/implementation/c0-tended-tunnels/mgmt-plane/identity/#types-of-principal).
 #[derive(Debug)]
-pub struct Principal {
+pub struct TlsPrincipal {
     pub id: SpiffeId,
     /// The node holding this principal's identity material.
     pub node: String,
@@ -88,13 +95,14 @@ pub struct Principal {
 /// A service seen from the outside: who may reach it, and how to dial it.
 #[derive(Debug)]
 pub struct Target {
-    /// The service's name in `services.yaml`; also its local forwarding handle.
+    /// The service's name; also its local forwarding handle.
     pub name: String,
     pub id: SpiffeId,
     /// The node hosting it.
     pub node: String,
-    /// The host node's declared address — what an initiator's link dials.
-    pub addr: SocketAddr,
+    /// The address of the host node's QUIC link-vertex — what an initiator's
+    /// link dials (the `via.addr` of the compiled link member).
+    pub link_addr: SocketAddr,
     /// The groups gating inbound access to it.
     pub groups: BTreeSet<String>,
 }
@@ -137,24 +145,24 @@ impl Plan {
                     name: name.clone(),
                     id: service_id(&trust_domain, name, service)?,
                     node: service.at.clone(),
-                    addr,
+                    link_addr: addr,
                     groups: service.groups.iter().cloned().collect(),
                 },
             );
         }
 
-        let mut principals = Vec::new();
+        let mut tls_principals = Vec::new();
         for node in nodes.keys() {
-            principals.extend(node_principals(model, &trust_domain, node)?);
+            tls_principals.extend(node_tls_principals(model, &trust_domain, node)?);
         }
-        principals.sort_by_key(|p| (p.id.to_string(), p.node.clone()));
+        tls_principals.sort_by_key(|p| (p.id.to_string(), p.node.clone()));
 
         Ok(Plan {
             trust_domain,
             signer_key_id,
             nodes,
             targets,
-            principals,
+            tls_principals,
         })
     }
 }
@@ -213,17 +221,17 @@ fn node_plan(name: &str, node: &Node) -> Result<NodePlan, Report<Error>> {
     })
 }
 
-/// Every principal whose identity material lives on `node`: the users with a
+/// Every TLS principal whose identity material lives on `node`: the users with a
 /// device here and the services hosted here.
 ///
-/// Both name their own SOCKS5 port — services in `services.yaml`, users in each
-/// device entry under `users.yaml` — so nothing is allocated here; uniqueness of
-/// those ports is a validator concern ([`super::super::rete::validate`]).
-fn node_principals(
+/// Any SOCKS5 listener a principal exposes is authored in the source, not
+/// allocated here; keeping those listeners unique on a node is a validator
+/// concern ([`super::super::rete::validate`]).
+fn node_tls_principals(
     model: &RepoModel,
     td: &TrustDomain,
     node: &str,
-) -> Result<Vec<Principal>, Report<Error>> {
+) -> Result<Vec<TlsPrincipal>, Report<Error>> {
     let mut local_services: Vec<(&String, &Service)> = model
         .services
         .iter()
@@ -250,7 +258,7 @@ fn node_principals(
         let id = build_id_in_rete(td, Kind::User, name).change_context_lazy(|| {
             Error::new(format!("Failed to build SPIFFE ID for user '{name}'"))
         })?;
-        out.push(Principal {
+        out.push(TlsPrincipal {
             id,
             node: node.to_string(),
             granted: granted_groups(model, &model.users[name].roles),
@@ -267,7 +275,7 @@ fn node_principals(
             io.push(IoChannel::Socks5 { listen });
         }
 
-        out.push(Principal {
+        out.push(TlsPrincipal {
             id: service_id(td, name, svc)?,
             node: node.to_string(),
             granted: granted_groups(model, &svc.roles),
@@ -295,5 +303,161 @@ fn identity_of(name: &str) -> Identity {
     Identity {
         cert_path: format!("{name}.crt").into(),
         priv_path: format!("{name}.key").into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::artifact::model::vertex::IoChannel;
+    use crate::config::rete::{LoadOpts, load};
+
+    use super::*;
+
+    /// A compact rete: one server node hosting `api`, one laptop hosting `alice`.
+    /// Loaded (merged) but not validated — these tests exercise plan resolution,
+    /// not the validator.
+    const RETE: &str = r#"
+rete:
+  name: rete-lovers
+  ca:
+    cert: certs/ca.crt
+  signers:
+    mgmt:
+      keys:
+        - { name: primary, cert: certs/management-planes/primary.crt }
+
+nodes:
+  alpha:
+    vertices:
+      - { name: public, kind: link, type: quic, address: "1.2.3.4:4433" }
+  laptop:
+    vertices:
+      - { name: flor, kind: link, type: quic }
+
+services:
+  api:
+    at: alpha
+    addr: "127.0.0.1:8000"
+    socks5_proxy: "127.0.0.1:18000"
+    groups: [api]
+    roles: [backend]
+
+groups:
+  api:
+  db:
+
+roles:
+  backend: { allow: [db] }
+  dev: { allow: [api, db] }
+
+users:
+  alice:
+    roles: [dev]
+    nodes:
+      - { at: laptop, socks5_proxy: "127.0.0.1:1080" }
+"#;
+
+    fn model(yaml: &str) -> RepoModel {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("rete.yaml"), yaml).expect("write rete.yaml");
+        load(&LoadOpts {
+            repo: dir.path().to_path_buf(),
+            files: vec![],
+        })
+        .expect("load")
+    }
+
+    fn td() -> TrustDomain {
+        TrustDomain::new("rete-lovers").unwrap()
+    }
+
+    fn set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn granted_groups_unions_role_allows() {
+        let m = model(RETE);
+        // `dev` grants api + db; `backend` grants db.
+        assert_eq!(granted_groups(&m, &["dev".into()]), set(&["api", "db"]));
+        assert_eq!(granted_groups(&m, &["backend".into()]), set(&["db"]));
+        // No roles, and unknown roles, grant nothing (unknown is silently skipped).
+        assert_eq!(granted_groups(&m, &[]), set(&[]));
+        assert_eq!(granted_groups(&m, &["nope".into()]), set(&[]));
+    }
+
+    #[test]
+    fn node_tls_principals_resolves_users_and_services() {
+        let m = model(RETE);
+
+        // laptop: just alice, with her device's SOCKS5 listener and dev's groups.
+        let laptop = node_tls_principals(&m, &td(), "laptop").unwrap();
+        assert_eq!(laptop.len(), 1);
+        assert_eq!(laptop[0].id.to_string(), "spiffe://rete-lovers/user/alice");
+        assert_eq!(laptop[0].granted, set(&["api", "db"]));
+        assert_eq!(
+            laptop[0].io,
+            vec![IoChannel::Socks5 {
+                listen: "127.0.0.1:1080".parse().unwrap()
+            }]
+        );
+
+        // alpha: api as both a tcp target and a socks5 initiator; backend->db.
+        let alpha = node_tls_principals(&m, &td(), "alpha").unwrap();
+        assert_eq!(alpha.len(), 1);
+        assert_eq!(alpha[0].id.to_string(), "spiffe://rete-lovers/service/api");
+        assert_eq!(alpha[0].granted, set(&["db"]));
+        assert_eq!(
+            alpha[0].io,
+            vec![
+                IoChannel::Tcp {
+                    upstream: "127.0.0.1:8000".parse().unwrap()
+                },
+                IoChannel::Socks5 {
+                    listen: "127.0.0.1:18000".parse().unwrap()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn build_resolves_targets_and_signer() {
+        let plan = Plan::build(&model(RETE)).expect("build");
+
+        assert_eq!(
+            plan.signer_key_id.to_string(),
+            "spiffe://rete-lovers/management-plane/primary"
+        );
+
+        // The service becomes a dialable target at its host node's link address.
+        let api = &plan.targets["api"];
+        assert_eq!(api.node, "alpha");
+        assert_eq!(api.link_addr, "1.2.3.4:4433".parse().unwrap());
+        assert_eq!(api.groups, set(&["api"]));
+
+        // Principals are sorted by SPIFFE ID: service/api before user/alice.
+        let ids: Vec<String> = plan
+            .tls_principals
+            .iter()
+            .map(|p| p.id.to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "spiffe://rete-lovers/service/api",
+                "spiffe://rete-lovers/user/alice"
+            ]
+        );
+    }
+
+    #[test]
+    fn build_rejects_a_service_on_an_initiator_only_node() {
+        // Move api onto the laptop, whose link-vertex declares no address.
+        let yaml = RETE.replace("at: alpha", "at: laptop");
+        let err = Plan::build(&model(&yaml)).expect_err("service on addr-less node must fail");
+        assert!(
+            format!("{err:?}").contains("initiator-only node"),
+            "{err:?}"
+        );
     }
 }

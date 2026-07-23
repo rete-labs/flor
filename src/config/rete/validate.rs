@@ -1477,6 +1477,10 @@ mod tests {
             Service {
                 at: "mgmt".into(),
                 via: None,
+                // `addr` is the service's upstream (an outbound `tcp` target),
+                // not a SOCKS5 listener — the uniqueness rule never inspects it.
+                // The only collision under test is the shared `127.0.0.1:1080`
+                // SOCKS5 listener below and on the user device.
                 addr: "127.0.0.1:8080".parse().unwrap(),
                 socks5_proxy: Some("127.0.0.1:1080".parse().unwrap()),
                 groups: vec![],
