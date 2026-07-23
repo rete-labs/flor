@@ -6,7 +6,7 @@
 //! `retectl compile` runs after `retectl validate` — [`compile`] assumes a model
 //! the [validator](super::rete::validate) accepted and turns it into one
 //! [`Envelope<VertexMgmtPayload>`](super::artifact::Envelope) per node, ready to
-//! be written under `<repo>/.flor/compiled/<node>/mgmt/vertices/<vertex>.json`.
+//! be written under `<repo>/.flor/compiled/<node>/mgmt/<vertex>.json`.
 //!
 //! Two stages, mirroring what the compiled artifact needs to say:
 //! - [`plan`] resolves the whole rete once — SPIFFE IDs, role→group expansion,
@@ -15,8 +15,9 @@
 //!   identity material and ACL rows relevant to its own workloads.
 //!
 //! The projection is pure and deterministic: the source model's collections are
-//! `HashMap`s, so every list this module emits is sorted. The one module that
-//! touches disk is [`layout`], which owns the compiled tree's on-disk layout.
+//! `HashMap`s, whose iteration order is *not* stable, so every list this module
+//! emits is explicitly sorted. The one module that touches disk is [`layout`],
+//! which owns the compiled tree's on-disk layout.
 //!
 //! Signing is not implemented yet — artifacts carry a placeholder [`Signature`]
 //! naming the rete's first mgmt signer, as `scripts/dev-bootstrap.sh` does by
@@ -56,11 +57,11 @@ pub struct NodeVertexArtifact {
 
 impl NodeVertexArtifact {
     /// Where this artifact lives, relative to the compiled tree root:
-    /// `<node>/mgmt/vertices/<vertex>.json`.
+    /// `<node>/mgmt/<vertex>.json`. C0's mgmt set is flat — one `<name>.json`
+    /// per workload — so there is no `vertices/` subdirectory.
     pub fn path(&self) -> PathBuf {
         PathBuf::from(&self.node)
             .join("mgmt")
-            .join("vertices")
             .join(format!("{}.json", self.vertex_name))
     }
 
@@ -306,11 +307,11 @@ users:
         // looks for it.
         assert_eq!(
             node(&artifacts, "alpha").path(),
-            PathBuf::from("alpha/mgmt/vertices/public.json")
+            PathBuf::from("alpha/mgmt/public.json")
         );
         assert_eq!(
             node(&artifacts, "alice-laptop").path(),
-            PathBuf::from("alice-laptop/mgmt/vertices/flor.json")
+            PathBuf::from("alice-laptop/mgmt/flor.json")
         );
     }
 

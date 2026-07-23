@@ -46,7 +46,7 @@ pub fn next_version(out: &Path) -> Result<u64, Report<Error>> {
     Ok(highest + 1)
 }
 
-/// Every artifact in the compiled tree: `<out>/<node>/mgmt/vertices/*.json`.
+/// Every artifact in the compiled tree: the flat `<out>/<node>/mgmt/*.json`.
 ///
 /// An absent tree is the first compile, not a failure; anything else that fails
 /// to list is real, since a tree we cannot walk is one we cannot trust the
@@ -65,17 +65,16 @@ fn artifact_paths(out: &Path) -> Result<Vec<std::path::PathBuf>, Report<Error>> 
     for node in nodes {
         let node =
             node.change_context_lazy(|| Error::new(format!("Failed to list {}", out.display())))?;
-        let vertices = node.path().join("mgmt").join("vertices");
-        let entries = match std::fs::read_dir(&vertices) {
+        let mgmt = node.path().join("mgmt");
+        let entries = match std::fs::read_dir(&mgmt) {
             Ok(entries) => entries,
             // Not every directory under the tree root is a node's: skip what
             // does not have the shape one has.
             Err(_) => continue,
         };
         for entry in entries {
-            let entry = entry.change_context_lazy(|| {
-                Error::new(format!("Failed to list {}", vertices.display()))
-            })?;
+            let entry = entry
+                .change_context_lazy(|| Error::new(format!("Failed to list {}", mgmt.display())))?;
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "json") {
                 paths.push(path);
