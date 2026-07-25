@@ -67,7 +67,7 @@ pub fn project(
         connection_manager: ConnectionManager {
             adapters: vec![Adapter::Udp {
                 name: WIRE_ADAPTER.to_string(),
-                listen: node_plan.listen(),
+                listen: node_plan.link_vertex.listen(),
             }],
         },
         workloads: locals
@@ -85,14 +85,14 @@ pub fn project(
 
     Ok(NodeVertexArtifact {
         node: node.to_string(),
-        vertex_name: node_plan.vertex_name.clone(),
+        vertex_name: node_plan.link_vertex.name.clone(),
         envelope: Envelope {
             schema_version: SCHEMA_VERSION.to_string(),
             plane: Plane::Mgmt,
             kind: ArtifactKind::Vertex,
             version: opts.version,
             node: node.to_string(),
-            name: node_plan.vertex_name.clone(),
+            name: node_plan.link_vertex.name.clone(),
             generated_at: opts.generated_at.clone(),
             payload,
             signature: Signature {
@@ -132,7 +132,7 @@ fn reachable<'a>(plan: &'a Plan, node: &str) -> BTreeMap<&'a str, (&'a Target, V
 }
 
 /// How to dial each reachable target: one member per target, over the single
-/// wire adapter, at the target's host-node address.
+/// wire adapter, at the link vertex hosting that target.
 fn links(reachable: &BTreeMap<&str, (&Target, Vec<&SpiffeId>)>) -> Vec<LinkRule> {
     if reachable.is_empty() {
         return Vec::new();

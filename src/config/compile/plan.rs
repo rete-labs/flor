@@ -46,21 +46,30 @@ pub struct Plan {
     pub tls_principals: Vec<TlsPrincipal>,
 }
 
-/// A node's link vertex — the one artifact C0 compiles per node.
+/// One node, resolved. C0 compiles exactly one vertex per node — its link
+/// vertex — so that is all this holds for now; further vertices become further
+/// fields here.
 #[derive(Debug)]
 pub struct NodePlan {
-    /// The link vertex's name; also the artifact's `name`, its filename, and the
+    /// The node's `kind: link, type: quic` vertex.
+    pub link_vertex: VertexPlan,
+}
+
+/// A single vertex, resolved.
+#[derive(Debug)]
+pub struct VertexPlan {
+    /// The vertex's name; also the artifact's `name`, its filename, and the
     /// `<name>` segment of the vertex's `vertex/<node>/<name>` SPIFFE ID.
-    pub vertex_name: String,
-    /// Where peers reach this node. `None` for initiator-only nodes (no
+    pub name: String,
+    /// Where peers reach this vertex. `None` for initiator-only nodes (no
     /// `address` — laptops behind NAT).
     pub address: Option<SocketAddr>,
 }
 
-impl NodePlan {
+impl VertexPlan {
     /// What the wire adapter binds: the declared port on an unspecified host.
     ///
-    /// `nodes.yaml` states where peers *reach* the node; the public IP may not
+    /// The source states where peers *reach* the vertex; the public IP may not
     /// exist on any local NIC (NAT, load balancer, floating address), so what
     /// the socket binds is the compiler's business.
     pub fn listen(&self) -> Option<SocketAddr> {
@@ -131,7 +140,7 @@ impl Plan {
                     service.at
                 ))
             })?;
-            let addr = host.address.ok_or_else(|| {
+            let addr = host.link_vertex.address.ok_or_else(|| {
                 Error::new(format!(
                     "Service '{name}' is hosted on initiator-only node '{}', \
                      whose link-vertex declares no `address`",
@@ -216,8 +225,10 @@ fn node_plan(name: &str, node: &Node) -> Result<NodePlan, Report<Error>> {
     }
 
     Ok(NodePlan {
-        vertex_name: vertex.name.clone(),
-        address: vertex.address,
+        link_vertex: VertexPlan {
+            name: vertex.name.clone(),
+            address: vertex.address,
+        },
     })
 }
 
