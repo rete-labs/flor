@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::identity::SpiffeId;
 
+use super::super::version::Contract;
+
 /// A signed compiled artifact: flat claims beside a typed `payload`.
 ///
 /// A closed metadata schema: every claim is enumerated and unknown fields are
@@ -35,7 +37,10 @@ use crate::core::identity::SpiffeId;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Envelope<P> {
-    /// Semver of the compiled-artifact public contract (e.g. `"1.0"`).
+    /// `major.minor` of the **envelope** contract only (e.g. `"1.0"`) — the
+    /// claims, the signature canonicalization, and the relays' frozen routing
+    /// core within it. Payload schemas ride their own ladders inside `payload`
+    /// (see [`Payload::FAMILY`]).
     pub schema_version: String,
     /// Whose authority signed this — `mgmt` or `ctrl`.
     pub plane: Plane,
@@ -102,12 +107,25 @@ pub enum ArtifactKind {
     Vertex,
 }
 
-/// Binds a typed payload to the `(plane, kind)` envelope cell it rides in, so
-/// envelope checks can be written once, generically. Each payload type maps to
-/// exactly one cell (mgmt+vertex, ctrl+vertex, mgmt+agent, …).
+/// Binds a typed payload to the `(plane, kind)` envelope cell it rides in and to
+/// the contract its own schema versions on, so envelope checks can be written
+/// once, generically. Each payload type maps to exactly one cell (mgmt+vertex,
+/// ctrl+vertex, mgmt+agent, …).
 pub trait Payload {
     const PLANE: PlaneTag;
     const KIND: ArtifactKind;
+
+    /// The payload-family contract this payload's schema versions on — a ladder
+    /// independent of the envelope's ([`version`](super::super::version)).
+    ///
+    /// A family is everything one consumer parses *jointly*, so it spans planes:
+    /// `VertexMgmtPayload` and the future `VertexCtrlPayload` name the same
+    /// contract, because the join rules between them are versioned by it too.
+    const FAMILY: Contract;
+
+    /// The family minor this artifact's content is stamped at — the value the
+    /// generic gate checks against [`FAMILY`](Payload::FAMILY).
+    fn schema_version(&self) -> &str;
 }
 
 /// A producer signature over the artifact.

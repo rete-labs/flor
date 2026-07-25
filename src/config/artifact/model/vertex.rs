@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::identity::SpiffeId;
 
+use super::super::version::{self, Contract};
 use super::envelope::{ArtifactKind, Payload, PlaneTag};
 
 /// Which forwarding engine a vertex runs. A plain discriminator: the mgmt
@@ -34,6 +35,10 @@ pub enum VertexKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VertexMgmtPayload {
+    /// `major.minor` of the vertex payload-family contract this content uses —
+    /// the family's own ladder, independent of the envelope's. Declared first so
+    /// it serializes first, as the C0 artifact examples show it.
+    pub schema_version: String,
     /// Which engine this vertex runs.
     pub kind: VertexKind,
     /// Scope-relative path to the rete CA certificate.
@@ -58,6 +63,11 @@ pub struct VertexMgmtPayload {
 impl Payload for VertexMgmtPayload {
     const PLANE: PlaneTag = PlaneTag::Mgmt;
     const KIND: ArtifactKind = ArtifactKind::Vertex;
+    const FAMILY: Contract = version::VERTEX;
+
+    fn schema_version(&self) -> &str {
+        &self.schema_version
+    }
 }
 
 /// The local transport a vertex terminates. Internally tagged on `type`;
@@ -220,6 +230,7 @@ mod tests {
     /// The exact C0 user-node link payload from validate-and-compile.mdx.
     fn user_node() -> Value {
         json!({
+            "schema_version": "1.0",
             "kind": "link",
             "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
@@ -254,6 +265,7 @@ mod tests {
     /// The exact C0 server-node link payload from validate-and-compile.mdx.
     fn server_node() -> Value {
         json!({
+            "schema_version": "1.0",
             "kind": "link",
             "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
@@ -406,6 +418,7 @@ mod tests {
     fn parses_mesh_payload() {
         // Same struct, `kind: mesh`.
         let v = json!({
+            "schema_version": "1.0",
             "kind": "mesh",
             "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
@@ -427,6 +440,7 @@ mod tests {
     fn florio_adapter_and_io_parse() {
         // Exercise the FlorIO variants (socket-bearing, bidirectional).
         let v = json!({
+            "schema_version": "1.0",
             "kind": "mesh",
             "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },

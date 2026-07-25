@@ -51,15 +51,18 @@ impl ValidatePayload for VertexMgmtPayload {
     }
 }
 
-/// Envelope-level checks, generic over any [`Payload`]: supported schema
-/// version, the `(plane, kind)` the payload declares, and the expected name.
+/// Envelope-level checks, generic over any [`Payload`]: both supported schema
+/// versions, the `(plane, kind)` the payload declares, and the expected name.
 fn validate_envelope<P: Payload>(
     env: &Envelope<P>,
     expected_name: &str,
 ) -> Result<(), Report<Error>> {
     // Fail-closed major.minor gate (see `version`): accept older-or-equal minors
-    // within the known major, reject a different major or a newer minor.
-    version::ensure_supported(&env.schema_version)?;
+    // within the known major, reject a different major or a newer minor. The
+    // envelope and the payload family version independently, so both are gated
+    // — here rather than in each `validate_payload`, so no payload can skip it.
+    version::ensure_supported(&version::ENVELOPE, &env.schema_version)?;
+    version::ensure_supported(&P::FAMILY, env.payload.schema_version())?;
     if env.plane.tag() != P::PLANE {
         bail!(Error::new(format!(
             "Artifact is on the {:?} plane, expected {:?}",
@@ -210,6 +213,7 @@ mod tests {
     /// may egress to over the declared udp adapter.
     fn valid_payload() -> Value {
         json!({
+            "schema_version": "1.0",
             "kind": "link",
             "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
@@ -261,11 +265,42 @@ mod tests {
     // --- envelope rules (generic over the payload's declared cell) ---
 
     #[test]
-    fn rejects_wrong_schema_version() {
+    fn rejects_wrong_envelope_schema_version() {
         let mut v = envelope_with(valid_payload());
         v["schema_version"] = json!("0.9");
         let err = parse(v).validate("flor").unwrap_err();
-        assert!(format!("{err:?}").contains("schema_version"), "{err:?}");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("schema_version"), "{msg}");
+        assert!(msg.contains("envelope"), "{msg}");
+    }
+
+    #[test]
+    fn rejects_wrong_payload_schema_version() {
+        // The payload family versions on its own ladder, so a current envelope
+        // does not vouch for the payload's minor.
+        let mut p = valid_payload();
+        p["schema_version"] = json!("1.9");
+        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("vertex payload"), "{msg}");
+        assert!(msg.contains("upgrade"), "{msg}");
+    }
+
+    #[test]
+    fn the_two_ladders_are_independent() {
+        // Each gate rejects on its own claim and ignores the other's. Were they
+        // one ladder, a bump on either side would have to move both.
+        let mut v = envelope_with(valid_payload());
+        v["schema_version"] = json!("2.0");
+        v["payload"]["schema_version"] = json!("1.0");
+        let err = parse(v).validate("flor").unwrap_err();
+        assert!(format!("{err:?}").contains("envelope"), "{err:?}");
+
+        let mut v = envelope_with(valid_payload());
+        v["schema_version"] = json!("1.0");
+        v["payload"]["schema_version"] = json!("2.0");
+        let err = parse(v).validate("flor").unwrap_err();
+        assert!(format!("{err:?}").contains("vertex payload"), "{err:?}");
     }
 
     #[test]
@@ -396,6 +431,7 @@ mod tests {
     #[test]
     fn mesh_passes_with_common_rules_met() {
         let mesh = json!({
+            "schema_version": "1.0",
             "kind": "mesh",
             "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
@@ -414,6 +450,7 @@ mod tests {
     fn mesh_still_enforces_common_rules() {
         // The via/adapter-type check is common, so a mesh artifact fails it too.
         let mesh = json!({
+            "schema_version": "1.0",
             "kind": "mesh",
             "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
@@ -434,6 +471,7 @@ mod tests {
         // An egress target with no direct link is fine for mesh (it routes via
         // the forwarding table), so the link-only check does not apply.
         let mesh = json!({
+            "schema_version": "1.0",
             "kind": "mesh",
             "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },

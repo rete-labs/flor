@@ -161,6 +161,7 @@ async fn link_vertex_relays_socks5_to_tcp_echo() {
         alpha_root,
         "alpha",
         json!({
+            "schema_version": "1.0",
             "kind": "link",
             "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
@@ -180,6 +181,7 @@ async fn link_vertex_relays_socks5_to_tcp_echo() {
         beta_root,
         "beta",
         json!({
+            "schema_version": "1.0",
             "kind": "link",
             "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
