@@ -33,23 +33,35 @@ fn day() -> Duration {
     Duration::from_secs(3600)
 }
 
-/// Mint an SVID for `uri`/`kind` from `ca` and write `<file>.crt`/`.key` flat
-/// into the rete root `root`.
+/// Lay down the scope's trust anchor: the rete CA and the trust-domain record
+/// enrollment ships beside it.
+fn write_store(ca: &Ca, root: &Path) {
+    std::fs::write(root.join("ca.crt"), ca.cert_pem()).unwrap();
+    std::fs::write(
+        root.join("rete.json"),
+        json!({ "trust_domain": TRUST_DOMAIN }).to_string(),
+    )
+    .unwrap();
+}
+
+/// Mint an SVID for `uri`/`kind` from `ca` and file it in the scope's identity
+/// store as `certs/<file>.crt`/`.key`, as enrollment would.
 fn write_svid(ca: &Ca, root: &Path, uri: &str, kind: Kind, file: &str) {
     let id = SpiffeId::new(uri).unwrap();
     let (key, csr) = keygen_csr(&id).unwrap();
     let leaf = ca.sign_csr(csr.as_bytes(), &id, kind, day()).unwrap();
-    std::fs::write(root.join(format!("{file}.crt")), leaf).unwrap();
-    std::fs::write(root.join(format!("{file}.key")), key.serialize_pem()).unwrap();
+    let certs = root.join("certs");
+    std::fs::create_dir_all(&certs).unwrap();
+    std::fs::write(certs.join(format!("{file}.crt")), leaf).unwrap();
+    std::fs::write(certs.join(format!("{file}.key")), key.serialize_pem()).unwrap();
 }
 
-/// Write a mgmt vertex artifact wrapping `payload` to `mgmt/vertices/flor.json`
-/// under the rete root, as the agent/compiler would place it.
+/// Write a mgmt vertex artifact wrapping `payload` to `mgmt/flor.json` under the
+/// scope root, as the agent/compiler would place it.
 fn write_artifact(root: &Path, node: &str, payload: Value) {
     let env = json!({
         "schema_version": "1.0",
         "plane": "mgmt",
-        "kind": "vertex",
         "version": 1,
         "node": node,
         "name": "flor",
@@ -57,7 +69,7 @@ fn write_artifact(root: &Path, node: &str, payload: Value) {
         "payload": payload,
         "signature": { "alg": "none", "key_id": "spiffe://demo.flor/management-plane/dev", "value": "x" }
     });
-    let dir = root.join("mgmt/vertices");
+    let dir = root.join("mgmt");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("flor.json"), serde_json::to_vec(&env).unwrap()).unwrap();
 }
@@ -136,7 +148,7 @@ async fn link_vertex_relays_socks5_to_tcp_echo() {
     // Initiator rete root (alice, a SOCKS5 caller).
     let alpha_dir = TempDir::new().unwrap();
     let alpha_root = alpha_dir.path();
-    std::fs::write(alpha_root.join("ca.crt"), ca.cert_pem()).unwrap();
+    write_store(&ca, alpha_root);
     write_svid(
         &ca,
         alpha_root,
@@ -148,7 +160,7 @@ async fn link_vertex_relays_socks5_to_tcp_echo() {
     // Server rete root (tcp-echo, relaying to the echo upstream).
     let beta_dir = TempDir::new().unwrap();
     let beta_root = beta_dir.path();
-    std::fs::write(beta_root.join("ca.crt"), ca.cert_pem()).unwrap();
+    write_store(&ca, beta_root);
     write_svid(
         &ca,
         beta_root,
@@ -163,12 +175,10 @@ async fn link_vertex_relays_socks5_to_tcp_echo() {
         json!({
             "schema_version": "1.0",
             "kind": "link",
-            "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
             "connection_manager": { "adapters": [ { "name": "wire", "type": "udp" } ] },
             "workloads": [
                 { "spiffe_id": "spiffe://demo.flor/user/alice",
-                  "identity": { "cert_path": "alice.crt", "priv_path": "alice.key" },
                   "io": [ { "kind": "socks5", "listen": ALPHA_SOCKS5 } ] }
             ],
             "links": [ { "type": "list", "members": [
@@ -183,12 +193,10 @@ async fn link_vertex_relays_socks5_to_tcp_echo() {
         json!({
             "schema_version": "1.0",
             "kind": "link",
-            "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
             "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": BETA_QUIC } ] },
             "workloads": [
                 { "spiffe_id": "spiffe://demo.flor/service/beta/tcp-echo",
-                  "identity": { "cert_path": "tcp-echo.crt", "priv_path": "tcp-echo.key" },
                   "io": [ { "kind": "tcp", "upstream": ECHO_UPSTREAM } ] }
             ],
             "ingress": [ { "target": "spiffe://demo.flor/service/beta/tcp-echo", "allow": ["spiffe://demo.flor/user/alice"] } ]
@@ -227,4 +235,128 @@ async fn link_vertex_relays_socks5_to_tcp_echo() {
         relayed.is_ok(),
         "SOCKS5 → mTLS → tcp-echo relay did not round-trip in time"
     );
+}
+
+/// A valid C0 rete: a management node, a server node hosting a rete-scoped and a
+/// node-scoped service, and one user device.
+const COMPILE_RETE: &str = r#"
+rete:
+  name: demo.flor
+  ca:
+    cert: certs/ca.crt
+  signers:
+    mgmt:
+      keys:
+        - { name: primary, cert: certs/management-planes/primary.crt }
+
+nodes:
+  mgmt01:
+    vertices:
+      - { name: public, kind: link, type: quic, address: "9.10.11.12:4433" }
+  alpha:
+    vertices:
+      - { name: public, kind: link, type: quic, address: "1.2.3.4:4433" }
+  alice-laptop:
+    vertices:
+      - { name: flor, kind: link, type: quic }
+
+services:
+  coordinator:
+    at: mgmt01
+    addr: "127.0.0.1:9000"
+    groups: [coordinator-sync]
+  coordinator-publisher:
+    at: mgmt01
+    addr: "127.0.0.1:9001"
+    groups: [coordinator-publish]
+  api:
+    at: alpha
+    addr: "127.0.0.1:8000"
+    socks5_proxy: "127.0.0.1:18000"
+    groups: [api]
+    roles: [api-backend]
+  ssh:
+    at: alpha
+    scope: node
+    addr: "0.0.0.0:22"
+    groups: [admin]
+
+groups:
+  coordinator-sync:
+  coordinator-publish:
+  api:
+  admin:
+
+roles:
+  node: { allow: [coordinator-sync] }
+  operator: { allow: [coordinator-publish] }
+  developer: { allow: [api, admin] }
+  api-backend: { allow: [admin] }
+
+users:
+  alice:
+    roles: [operator, developer]
+    nodes:
+      - { at: alice-laptop, socks5_proxy: "127.0.0.1:1080" }
+"#;
+
+/// What `retectl compile` emits must be exactly what `flor vertex` loads.
+///
+/// The two halves are otherwise tested apart — `tests/compile.rs` re-implements
+/// the consumer's parse over a hardcoded path, and the relay test above feeds
+/// `ConfigBundle::load` hand-written artifacts — so nothing pins the seam
+/// between them. It is a seam that has drifted before: the compiler moved to a
+/// flat `mgmt/<name>.json` while the consumer still read `mgmt/vertices/`, and
+/// every test stayed green. This one fails if either side moves alone.
+#[test]
+fn compiler_output_loads_in_the_vertex_runtime() {
+    let repo = TempDir::new().unwrap();
+    std::fs::write(repo.path().join("rete.yaml"), COMPILE_RETE).unwrap();
+
+    assert_cmd::Command::cargo_bin("retectl")
+        .unwrap()
+        .args(["compile", "--repo"])
+        .arg(repo.path())
+        .assert()
+        .success();
+
+    // A compiled node directory already holds `mgmt/`, so it *is* a scope root
+    // once enrollment lays the identity store beside it.
+    let node_root = repo.path().join(".flor/compiled/alpha");
+    let ca = Ca::init(&TrustDomain::new(TRUST_DOMAIN).unwrap(), day()).unwrap();
+    write_store(&ca, &node_root);
+
+    // Mint every principal the compiler named, filed by leaf as the store
+    // resolves it. Reading the IDs out of the artifact (rather than restating
+    // them) is the point: whatever the compiler emits must be resolvable, and
+    // `ssh` exercises a node-scoped ID whose leaf is not its full path.
+    let artifact: Value =
+        serde_json::from_slice(&std::fs::read(node_root.join("mgmt/public.json")).unwrap())
+            .unwrap();
+    let workloads = artifact["payload"]["workloads"].as_array().unwrap();
+    assert_eq!(workloads.len(), 2, "expected api + ssh on alpha");
+    for workload in workloads {
+        let uri = workload["spiffe_id"].as_str().unwrap();
+        let id = SpiffeId::new(uri).unwrap();
+        write_svid(
+            &ca,
+            &node_root,
+            uri,
+            flor::core::identity::kind_of(&id).unwrap(),
+            flor::core::identity::leaf_of(&id).unwrap(),
+        );
+    }
+
+    let config = ConfigBundle::load(&node_root, "public").unwrap();
+
+    // The compiled `address: 1.2.3.4:4433` binds unspecified on the same port.
+    assert_eq!(config.endpoint_addr.0.to_string(), "0.0.0.0:4433");
+    assert_eq!(
+        config.trust_bundle.0.trust_domain().to_string(),
+        TRUST_DOMAIN
+    );
+    // Both services are tcp targets; only `api` also declares a SOCKS5 listener.
+    assert_eq!(config.tcp_direct_bindings.0.len(), 2);
+    assert_eq!(config.socks5_bindings.0.len(), 1);
+    assert_eq!(config.socks5_bindings.0[0].1.to_string(), "127.0.0.1:18000");
 }

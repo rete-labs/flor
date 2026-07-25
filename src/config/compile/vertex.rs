@@ -4,9 +4,10 @@
 //! Projection of the resolved [`Plan`] onto one node's vertex artifact.
 //!
 //! Per-node filtering is the whole point: a node's artifact carries only the
-//! identity references (SPIFFE IDs and cert/key paths, not the SVID material
-//! itself) and ACL rows its own workloads need. Three tables fall out of the
-//! plan, and the doc's terms name them from flor's point of view:
+//! identity references (SPIFFE IDs — never the SVID material, nor where it sits;
+//! the node's identity store resolves that) and the ACL rows its own workloads
+//! need. Three tables fall out of the plan, and the doc's terms name them from
+//! flor's point of view:
 //!
 //! - `ingress` — which remote principals may initiate to a target hosted *here*.
 //!   This is the authoritative access-control gate.
@@ -23,16 +24,11 @@ use error_stack::Report;
 use crate::config::artifact::model::vertex::{
     Acl, Adapter, ConnectionManager, LinkMember, LinkRule, TransportEndpoint, Via, Workload,
 };
-use crate::config::artifact::{
-    ArtifactKind, Envelope, Plane, Signature, VertexKind, VertexMgmtPayload, version,
-};
+use crate::config::artifact::{Envelope, Plane, Signature, VertexKind, VertexMgmtPayload, version};
 use crate::core::identity::SpiffeId;
 
 use super::plan::{NodePlan, Plan, Target, TlsPrincipal};
 use super::{CompileOpts, Error, NodeVertexArtifact};
-
-/// The rete CA, as the flat install root holds it.
-const CA_CERT_FILE: &str = "ca.crt";
 
 /// A link vertex has exactly one adapter — one QUIC endpoint over one UDP
 /// socket. Its name is a local handle each link's `via` references.
@@ -63,7 +59,6 @@ pub fn project(
         // minor this content needs — trivially so while only 1.0 exists.
         schema_version: version::VERTEX.stamp(),
         kind: VertexKind::Link,
-        ca_cert_path: CA_CERT_FILE.into(),
         transport_endpoint: TransportEndpoint::Quic,
         connection_manager: ConnectionManager {
             adapters: vec![Adapter::Udp {
@@ -75,7 +70,6 @@ pub fn project(
             .iter()
             .map(|p| Workload {
                 spiffe_id: p.id.clone(),
-                identity: p.identity.clone(),
                 io: p.io.clone(),
             })
             .collect(),
@@ -90,7 +84,6 @@ pub fn project(
         envelope: Envelope {
             schema_version: version::ENVELOPE.stamp(),
             plane: Plane::Mgmt,
-            kind: ArtifactKind::Vertex,
             version: opts.version,
             node: node.to_string(),
             name: node_plan.link_vertex.name.clone(),
@@ -203,7 +196,7 @@ fn sorted_ids<'a>(ids: impl Iterator<Item = &'a SpiffeId>) -> Vec<SpiffeId> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::config::artifact::model::vertex::{Identity, IoChannel};
+    use crate::config::artifact::model::vertex::IoChannel;
     use crate::core::identity::{Kind, TrustDomain, build_id_in_rete};
 
     use super::*;
@@ -222,13 +215,6 @@ mod tests {
 
     fn set(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
-    }
-
-    fn identity() -> Identity {
-        Identity {
-            cert_path: "x.crt".into(),
-            priv_path: "x.key".into(),
-        }
     }
 
     fn target(name: &str, node: &str, addr: &str, groups: &[&str]) -> Target {
@@ -258,7 +244,6 @@ mod tests {
             id: user_id("alice"),
             node: "laptop".into(),
             granted: set(&["api"]),
-            identity: identity(),
             io: vec![IoChannel::Socks5 {
                 listen: "127.0.0.1:1080".parse().unwrap(),
             }],
@@ -267,7 +252,6 @@ mod tests {
             id: svc_id("api"),
             node: "alpha".into(),
             granted: set(&["db"]),
-            identity: identity(),
             io: vec![IoChannel::Tcp {
                 upstream: "127.0.0.1:8000".parse().unwrap(),
             }],

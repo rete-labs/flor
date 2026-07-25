@@ -176,7 +176,18 @@ pub fn scope_of(id: &SpiffeId) -> Result<Scope, Report<Error>> {
     }
 }
 
-fn path_segments(id: &SpiffeId) -> impl Iterator<Item = &str> {
+/// The principal's **leaf** — the last segment of its SPIFFE path.
+///
+/// The name a principal is filed under locally: `/user/alice` and
+/// `/service/alpha/ssh` yield `alice` and `ssh`. Leafs are unique across kinds
+/// within a node (a validator rule), so they key the per-scope identity store.
+pub fn leaf_of(id: &SpiffeId) -> Result<&str, Report<Error>> {
+    path_segments(id)
+        .next_back()
+        .ok_or_else(|| Report::new(Error::new("SPIFFE ID has no path segments")))
+}
+
+fn path_segments(id: &SpiffeId) -> impl DoubleEndedIterator<Item = &str> {
     // `SpiffeId::path()` returns "" for empty paths and "/a/b/c" otherwise.
     // `split('/')` on "/a/b" yields ["", "a", "b"]; drop the empty prefix.
     id.path().split('/').filter(|s| !s.is_empty())
@@ -217,6 +228,25 @@ mod tests {
             format!("{err:?}").contains("Unknown principal kind"),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn leaf_of_reads_last_segment() {
+        // Rete- and node-scoped principals alike file under their last segment.
+        assert_eq!(
+            leaf_of(&id("spiffe://demo.flor/user/alice")).unwrap(),
+            "alice"
+        );
+        assert_eq!(
+            leaf_of(&id("spiffe://demo.flor/service/alpha/ssh")).unwrap(),
+            "ssh"
+        );
+    }
+
+    #[test]
+    fn leaf_of_rejects_a_pathless_id() {
+        let err = leaf_of(&id("spiffe://demo.flor")).unwrap_err();
+        assert!(format!("{err:?}").contains("no path segments"), "{err:?}");
     }
 
     #[test]

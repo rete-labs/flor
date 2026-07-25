@@ -84,7 +84,7 @@ struct VertexRunArgs {
     /// rete is enrolled.
     #[arg(long)]
     rete: Option<String>,
-    /// Vertex name — selects `mgmt/vertices/<name>.json` under the rete root.
+    /// Vertex name — selects `mgmt/<name>.json` under the rete root.
     #[arg(long)]
     name: String,
 }

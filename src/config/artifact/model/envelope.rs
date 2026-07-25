@@ -5,14 +5,17 @@
 //! signature.
 //!
 //! [`Envelope`] is generic over its payload `P`, so one shape serves every
-//! artifact. The concrete payload is keyed by the `(plane, kind)` pair, not
-//! `kind` alone — `Envelope<VertexMgmtPayload>` (mgmt+vertex) now,
-//! `Envelope<AgentMgmtPayload>` (mgmt+agent) and `Envelope<VertexCtrlPayload>`
-//! (ctrl+vertex) later — with no change here. Per-`kind` data lives in the
-//! payload (`P`); per-`plane` data rides on the [`Plane`] discriminator itself
-//! (ctrl's `obeys_mgmt_version`); the remaining claims are universal. This is
-//! the architecture seam ADR-0010 describes: identity is `(node, plane, kind,
-//! name)`, carried as claims beside the payload.
+//! artifact. There is deliberately **no envelope `kind`**: dispatch is by
+//! `name`. Each consumer parses only the artifacts addressed to it and already
+//! knows its own payload schema, so a new supervised workload is a new name,
+//! never an envelope change. The concrete payload is keyed by the
+//! `(plane, family)` pair — `Envelope<VertexMgmtPayload>` now,
+//! `Envelope<AgentMgmtPayload>` and `Envelope<VertexCtrlPayload>` later — with
+//! no change here. Payload-specific data lives in `P` (a vertex payload carries
+//! its own `link`/`mesh` discriminator); per-`plane` data rides on the [`Plane`]
+//! discriminator itself (ctrl's `obeys_mgmt_version`); the remaining claims are
+//! universal. This is the architecture seam ADR-0010 describes: identity is
+//! `(node, plane, name)`, carried as claims beside the payload.
 
 use serde::{Deserialize, Serialize};
 
@@ -44,14 +47,12 @@ pub struct Envelope<P> {
     pub schema_version: String,
     /// Whose authority signed this — `mgmt` or `ctrl`.
     pub plane: Plane,
-    /// Which Florete process consumes this.
-    pub kind: ArtifactKind,
     /// Monotonic per-compilation number (rollback-attack defence).
     pub version: u64,
     /// The node this artifact is projected for.
     pub node: String,
-    /// The artifact's name within its `(node, kind)` space. With
-    /// `(node, plane, kind)` it identifies the artifact.
+    /// The consuming workload's name — and the whole of dispatch. With
+    /// `(node, plane)` it identifies the artifact.
     pub name: String,
     /// Compile timestamp (RFC 3339; kept as an opaque string, not parsed).
     pub generated_at: String,
@@ -99,21 +100,11 @@ pub enum PlaneTag {
     Ctrl,
 }
 
-/// Which Florete process an artifact is consumed by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactKind {
-    Agent,
-    Vertex,
-}
-
-/// Binds a typed payload to the `(plane, kind)` envelope cell it rides in and to
-/// the contract its own schema versions on, so envelope checks can be written
-/// once, generically. Each payload type maps to exactly one cell (mgmt+vertex,
-/// ctrl+vertex, mgmt+agent, …).
+/// Binds a typed payload to the `(plane, family)` envelope cell it rides in,
+/// so envelope checks can be written once, generically. Each payload type maps
+/// to exactly one cell (mgmt+vertex, ctrl+vertex, mgmt+agent, …).
 pub trait Payload {
     const PLANE: PlaneTag;
-    const KIND: ArtifactKind;
 
     /// The payload-family contract this payload's schema versions on — a ladder
     /// independent of the envelope's ([`version`](super::super::version)).
@@ -153,7 +144,6 @@ mod tests {
         json!({
             "schema_version": "1.0",
             "plane": "mgmt",
-            "kind": "vertex",
             "version": 42,
             "node": "alpha",
             "name": "flor",
@@ -172,7 +162,6 @@ mod tests {
         let env: Envelope<Value> = serde_json::from_value(minimal()).unwrap();
         assert_eq!(env.schema_version, "1.0");
         assert_eq!(env.plane, Plane::Mgmt);
-        assert_eq!(env.kind, ArtifactKind::Vertex);
         assert_eq!(env.version, 42);
         assert_eq!(env.node, "alpha");
         assert_eq!(env.name, "flor");
@@ -188,15 +177,25 @@ mod tests {
     }
 
     #[test]
-    fn agent_artifact_is_named_agent() {
-        // The agent envelope is the same shape, named "agent" (one per node).
+    fn a_different_artifact_differs_only_by_name() {
+        // Dispatch is by name alone: the supervisor's own config is the same
+        // envelope shape, named "agent". Nothing else in the envelope moves —
+        // that is what lets a new workload be a new name, not a schema change.
         let mut v = minimal();
-        let obj = v.as_object_mut().unwrap();
-        obj.insert("kind".into(), json!("agent"));
-        obj.insert("name".into(), json!("agent"));
+        v["name"] = json!("agent");
         let env: Envelope<Value> = serde_json::from_value(v).unwrap();
-        assert_eq!(env.kind, ArtifactKind::Agent);
         assert_eq!(env.name, "agent");
+        assert_eq!(env.plane, Plane::Mgmt);
+    }
+
+    #[test]
+    fn rejects_a_kind_claim() {
+        // `kind` left the envelope; the closed schema must not tolerate it
+        // lingering in an artifact compiled against the older shape.
+        let mut v = minimal();
+        v["kind"] = json!("vertex");
+        let err = serde_json::from_value::<Envelope<Value>>(v).unwrap_err();
+        assert!(err.is_data(), "{err}");
     }
 
     #[test]

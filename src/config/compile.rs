@@ -12,7 +12,7 @@
 //! - [`plan`] resolves the whole rete once — SPIFFE IDs, role→group expansion,
 //!   local port allocation, per-node placement.
 //! - [`vertex`] projects that resolved view onto a single node, keeping only the
-//!   identity material and ACL rows relevant to its own workloads.
+//!   identity references and ACL rows relevant to its own workloads.
 //!
 //! The projection is pure and deterministic: the source model's collections are
 //! `HashMap`s, whose iteration order is *not* stable, so every list this module
@@ -115,7 +115,7 @@ mod tests {
     use std::net::SocketAddr;
 
     use crate::config::artifact::model::vertex::{Adapter, IoChannel, LinkRule};
-    use crate::config::artifact::{ArtifactKind, Plane, version};
+    use crate::config::artifact::{Plane, version};
     use crate::config::rete::{LoadOpts, load};
 
     use super::*;
@@ -321,7 +321,6 @@ users:
         let env = &node(&artifacts, "alpha").envelope;
         assert_eq!(env.schema_version, "1.0");
         assert_eq!(env.plane, Plane::Mgmt);
-        assert_eq!(env.kind, ArtifactKind::Vertex);
         assert_eq!(env.version, 42);
         assert_eq!(env.node, "alpha");
         assert_eq!(env.name, "public");
@@ -449,9 +448,30 @@ users:
             ssh.spiffe_id.to_string(),
             "spiffe://rete-lovers/service/alpha/ssh"
         );
-        // Identity material is a bare filename at the flat install root.
-        assert_eq!(ssh.identity.cert_path, PathBuf::from("ssh.crt"));
-        assert_eq!(ssh.identity.priv_path, PathBuf::from("ssh.key"));
+    }
+
+    #[test]
+    fn artifacts_carry_no_filesystem_references() {
+        // The shape the design mandates: principals are named by SPIFFE ID and
+        // nothing else, so the same signed JSON is valid wherever the node's
+        // scope root lives. Asserted over the serialized form, since it is the
+        // wire bytes — not the Rust types — that a consumer is handed.
+        let artifacts = all(RETE_LOVERS);
+        let json: serde_json::Value =
+            serde_json::to_value(&node(&artifacts, "alpha").envelope).unwrap();
+
+        // Dispatch is by `name`; the envelope claims no `kind`.
+        assert!(json.get("kind").is_none(), "{json}");
+        assert_eq!(json["name"], "public");
+
+        let payload = &json["payload"];
+        assert!(payload.get("ca_cert_path").is_none(), "{payload}");
+        for workload in payload["workloads"].as_array().unwrap() {
+            assert!(workload.get("identity").is_none(), "{workload}");
+            assert!(workload["spiffe_id"].is_string(), "{workload}");
+        }
+        // The payload keeps its own engine discriminator — a different axis.
+        assert_eq!(payload["kind"], "link");
     }
 
     #[test]

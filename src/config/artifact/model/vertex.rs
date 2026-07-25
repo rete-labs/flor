@@ -11,6 +11,11 @@
 //! internally tagged: adapters and link rules on `type`, io channels on
 //! `kind`. An io channel's direction is intrinsic to its `kind` (no
 //! `direction` field) — see [`IoChannel::direction`].
+//!
+//! **No identity paths.** A workload names its principal by SPIFFE ID and the
+//! node's [identity store](crate::core::identity::Store) materializes it, so the
+//! same compiled JSON is valid wherever the scope root lives and on any OS. The
+//! only paths here are local socket addresses a FlorIO channel binds.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -20,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::identity::SpiffeId;
 
 use super::super::version::{self, Contract};
-use super::envelope::{ArtifactKind, Payload, PlaneTag};
+use super::envelope::{Payload, PlaneTag};
 
 /// Which forwarding engine a vertex runs. A plain discriminator: the mgmt
 /// payload is field-identical across both.
@@ -41,8 +46,6 @@ pub struct VertexMgmtPayload {
     pub schema_version: String,
     /// Which engine this vertex runs.
     pub kind: VertexKind,
-    /// Scope-relative path to the rete CA certificate.
-    pub ca_cert_path: PathBuf,
     /// The local transport the vertex terminates.
     pub transport_endpoint: TransportEndpoint,
     /// Local transport mechanisms a link can dial over.
@@ -62,7 +65,6 @@ pub struct VertexMgmtPayload {
 
 impl Payload for VertexMgmtPayload {
     const PLANE: PlaneTag = PlaneTag::Mgmt;
-    const KIND: ArtifactKind = ArtifactKind::Vertex;
     const FAMILY: Contract = version::VERTEX;
 
     fn schema_version(&self) -> &str {
@@ -116,21 +118,16 @@ impl Adapter {
 
 /// A communicating principal wired into the vertex, keyed by its SPIFFE ID —
 /// an initiator (inbound io), a target (outbound io), or both.
+///
+/// The SPIFFE ID is the *only* reference to identity: the artifact says who,
+/// never where the material sits. The consumer resolves it through its node's
+/// [identity store](crate::core::identity::Store).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Workload {
     #[serde(with = "super::sid")]
     pub spiffe_id: SpiffeId,
-    pub identity: Identity,
     pub io: Vec<IoChannel>,
-}
-
-/// A workload's on-disk identity material (scope-relative paths).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Identity {
-    pub cert_path: PathBuf,
-    pub priv_path: PathBuf,
 }
 
 /// How a workload is wired into flor locally. Internally tagged on `kind`;
@@ -232,18 +229,15 @@ mod tests {
         json!({
             "schema_version": "1.0",
             "kind": "link",
-            "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
             "connection_manager": { "adapters": [ { "name": "wire", "type": "udp" } ] },
             "workloads": [
                 {
                     "spiffe_id": "spiffe://rete-lovers/node/alice-laptop",
-                    "identity": { "cert_path": "alice-laptop.crt", "priv_path": "alice-laptop.key" },
                     "io": [ { "kind": "socks5", "listen": "127.0.0.1:1081" } ]
                 },
                 {
                     "spiffe_id": "spiffe://rete-lovers/user/alice",
-                    "identity": { "cert_path": "alice.crt", "priv_path": "alice.key" },
                     "io": [ { "kind": "socks5", "listen": "127.0.0.1:1080" } ]
                 }
             ],
@@ -267,18 +261,15 @@ mod tests {
         json!({
             "schema_version": "1.0",
             "kind": "link",
-            "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
             "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "0.0.0.0:4433" } ] },
             "workloads": [
                 {
                     "spiffe_id": "spiffe://rete-lovers/node/alpha",
-                    "identity": { "cert_path": "alpha.crt", "priv_path": "alpha.key" },
                     "io": [ { "kind": "socks5", "listen": "127.0.0.1:1080" } ]
                 },
                 {
                     "spiffe_id": "spiffe://rete-lovers/service/api",
-                    "identity": { "cert_path": "api.crt", "priv_path": "api.key" },
                     "io": [
                         { "kind": "tcp",    "upstream": "127.0.0.1:8000" },
                         { "kind": "socks5", "listen":   "127.0.0.1:18000" }
@@ -286,7 +277,6 @@ mod tests {
                 },
                 {
                     "spiffe_id": "spiffe://rete-lovers/service/alpha/ssh",
-                    "identity": { "cert_path": "ssh.crt", "priv_path": "ssh.key" },
                     "io": [ { "kind": "tcp", "upstream": "0.0.0.0:22" } ]
                 }
             ],
@@ -311,7 +301,6 @@ mod tests {
     fn parses_user_node_payload() {
         let p: VertexMgmtPayload = serde_json::from_value(user_node()).unwrap();
         assert_eq!(p.kind, VertexKind::Link);
-        assert_eq!(p.ca_cert_path, PathBuf::from("ca.crt"));
         assert_eq!(p.transport_endpoint, TransportEndpoint::Quic);
 
         // Single UDP adapter, no listen (initiator-only).
@@ -331,7 +320,6 @@ mod tests {
             w0.spiffe_id.to_string(),
             "spiffe://rete-lovers/node/alice-laptop"
         );
-        assert_eq!(w0.identity.cert_path, PathBuf::from("alice-laptop.crt"));
         assert_eq!(w0.io.len(), 1);
         assert_eq!(w0.io[0].direction(), Direction::Inbound);
         match &w0.io[0] {
@@ -420,7 +408,6 @@ mod tests {
         let v = json!({
             "schema_version": "1.0",
             "kind": "mesh",
-            "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
             "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "0.0.0.0:4433" } ] },
             "workloads": [],
@@ -442,12 +429,10 @@ mod tests {
         let v = json!({
             "schema_version": "1.0",
             "kind": "mesh",
-            "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
             "connection_manager": { "adapters": [ { "name": "io", "type": "florio", "socket": "/run/flor.sock" } ] },
             "workloads": [
                 { "spiffe_id": "spiffe://rete-lovers/vertex/alpha/rete",
-                  "identity": { "cert_path": "rete.crt", "priv_path": "rete.key" },
                   "io": [ { "kind": "florio", "socket": "/run/wl.sock" } ] }
             ],
             "links": [
@@ -487,9 +472,29 @@ mod tests {
     #[test]
     fn rejects_missing_required_field() {
         let mut v = user_node();
-        v.as_object_mut().unwrap().remove("ca_cert_path");
+        v.as_object_mut().unwrap().remove("transport_endpoint");
         let err = serde_json::from_value::<VertexMgmtPayload>(v).unwrap_err();
-        assert!(err.to_string().contains("ca_cert_path"), "{err}");
+        assert!(err.to_string().contains("transport_endpoint"), "{err}");
+    }
+
+    #[test]
+    fn rejects_the_dropped_identity_path_fields() {
+        // Artifacts carry no filesystem references. The closed schema is what
+        // stops an artifact compiled against the older shape from loading with
+        // its paths silently ignored.
+        let mut v = user_node();
+        v["ca_cert_path"] = json!("ca.crt");
+        assert!(
+            serde_json::from_value::<VertexMgmtPayload>(v).is_err(),
+            "payload-level ca_cert_path must be rejected"
+        );
+
+        let mut v = user_node();
+        v["workloads"][0]["identity"] = json!({ "cert_path": "a.crt", "priv_path": "a.key" });
+        assert!(
+            serde_json::from_value::<VertexMgmtPayload>(v).is_err(),
+            "per-workload identity paths must be rejected"
+        );
     }
 
     #[test]

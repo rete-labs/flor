@@ -6,9 +6,10 @@
 # gitignored `.flor-dev/` at the repo root — one rete root per node:
 #
 #   .flor-dev/ca.crt, ca.key             rete CA (trust bundle + signing key)
-#   .flor-dev/retes/<scope>/             a rete root per node, for `flor vertex run`:
-#       ca.crt, <name>.crt, <name>.key   flat identity material
-#       mgmt/vertices/flor.json          the compiled vertex artifact
+#   .flor-dev/retes/<scope>/             a scope root per node, for `flor vertex run`:
+#       ca.crt, rete.json                the identity store's trust anchor
+#       certs/<name>.crt, <name>.key     the store's principal material
+#       mgmt/flor.json                   the compiled vertex artifact
 #
 # `flor vertex run --rete <scope> --name flor` reads a rete root once
 # `FLOR_HOME=.flor-dev` points the home dir at it (see scripts/e2e-relay.sh).
@@ -52,59 +53,62 @@ echo "==> Initialising rete CA for trust domain '$TRUST_DOMAIN'"
   --out-cert "$DEV_DIR/ca.crt" \
   --out-key "$DEV_DIR/ca.key"
 
-# Prepare a rete root per node (flat layout + the mgmt/vertices/ tree).
+# Prepare a scope root per node: the identity store's trust anchor (CA cert +
+# trust-domain record) and the flat mgmt set the vertex artifact lands in.
 for scope in alpha beta; do
-  mkdir -p "$RETES_DIR/$scope/mgmt/vertices"
+  mkdir -p "$RETES_DIR/$scope/mgmt" "$RETES_DIR/$scope/certs"
   cp "$DEV_DIR/ca.crt" "$RETES_DIR/$scope/ca.crt"
+  printf '{ "trust_domain": "%s" }\n' "$TRUST_DOMAIN" >"$RETES_DIR/$scope/rete.json"
 done
 
-# Mint one principal directly into a rete root: keygen a CSR locally, sign it.
-#   $1 scope (rete root)   $2 kind   $3 name   $4 node-scope (empty = rete-scoped)
+# Mint one principal into a scope's identity store: keygen a CSR locally, sign
+# it, and file both under `certs/<name>` — where the consumer looks it up by the
+# SPIFFE ID's leaf, since artifacts carry no paths.
+#   $1 scope (scope root)   $2 kind   $3 name   $4 node-scope (empty = rete-scoped)
 mint() {
   local scope="$1" kind="$2" name="$3" node="${4:-}"
-  local root="$RETES_DIR/$scope"
+  local certs="$RETES_DIR/$scope/certs"
   local csr="$CSR_DIR/$scope-$name.csr"
 
+  # Expanded via `${a[@]+…}`: under `set -u`, bash 3.2 (what macOS ships) treats
+  # an empty array as unset and aborts on a bare "${a[@]}".
   local scope_args=()
   [[ -n "$node" ]] && scope_args=(--scope "$node")
 
   "$FLOR" id keygen \
     --kind "$kind" --name "$name" --trust-domain "$TRUST_DOMAIN" \
-    "${scope_args[@]}" \
-    --out-key "$root/$name.key" --out-csr "$csr"
+    ${scope_args[@]+"${scope_args[@]}"} \
+    --out-key "$certs/$name.key" --out-csr "$csr"
 
   "$RETECTL" ca sign \
-    --csr "$csr" --kind "$kind" --name "$name" "${scope_args[@]}" \
+    --csr "$csr" --kind "$kind" --name "$name" ${scope_args[@]+"${scope_args[@]}"} \
     --ca-cert "$DEV_DIR/ca.crt" --ca-key "$DEV_DIR/ca.key" \
-    --out "$root/$name.crt"
+    --out "$certs/$name.crt"
 }
 
-echo "==> Minting principals into rete roots"
+echo "==> Minting principals into the scopes' identity stores"
 mint alpha user    alice
 mint alpha user    bob
 mint beta  service tcp-echo beta
 
 # alpha — the initiator node: alice/bob reach tcp-echo (on beta) over SOCKS5.
-cat >"$RETES_DIR/alpha/mgmt/vertices/flor.json" <<JSON
+cat >"$RETES_DIR/alpha/mgmt/flor.json" <<JSON
 {
   "schema_version": "1.0",
   "plane": "mgmt",
-  "kind": "vertex",
   "version": 1,
   "node": "alpha",
   "name": "flor",
   "generated_at": "2026-01-01T00:00:00Z",
   "payload": {
+    "schema_version": "1.0",
     "kind": "link",
-    "ca_cert_path": "ca.crt",
     "transport_endpoint": { "type": "quic" },
     "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "127.0.0.1:31337" } ] },
     "workloads": [
       { "spiffe_id": "spiffe://$TRUST_DOMAIN/user/alice",
-        "identity": { "cert_path": "alice.crt", "priv_path": "alice.key" },
         "io": [ { "kind": "socks5", "listen": "127.0.0.1:1080" } ] },
       { "spiffe_id": "spiffe://$TRUST_DOMAIN/user/bob",
-        "identity": { "cert_path": "bob.crt", "priv_path": "bob.key" },
         "io": [ { "kind": "socks5", "listen": "127.0.0.1:1081" } ] }
     ],
     "links": [
@@ -121,23 +125,21 @@ cat >"$RETES_DIR/alpha/mgmt/vertices/flor.json" <<JSON
 JSON
 
 # beta — the server node: serves tcp-echo, relaying to a local TCP upstream.
-cat >"$RETES_DIR/beta/mgmt/vertices/flor.json" <<JSON
+cat >"$RETES_DIR/beta/mgmt/flor.json" <<JSON
 {
   "schema_version": "1.0",
   "plane": "mgmt",
-  "kind": "vertex",
   "version": 1,
   "node": "beta",
   "name": "flor",
   "generated_at": "2026-01-01T00:00:00Z",
   "payload": {
+    "schema_version": "1.0",
     "kind": "link",
-    "ca_cert_path": "ca.crt",
     "transport_endpoint": { "type": "quic" },
     "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "127.0.0.1:31440" } ] },
     "workloads": [
       { "spiffe_id": "spiffe://$TRUST_DOMAIN/service/beta/tcp-echo",
-        "identity": { "cert_path": "tcp-echo.crt", "priv_path": "tcp-echo.key" },
         "io": [ { "kind": "tcp", "upstream": "127.0.0.1:32450" } ] }
     ],
     "ingress": [
