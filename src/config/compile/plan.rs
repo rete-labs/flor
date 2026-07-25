@@ -20,7 +20,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use error_stack::{Report, ResultExt, bail};
 
-use crate::config::artifact::model::vertex::{Identity, IoChannel};
+use crate::config::artifact::model::vertex::IoChannel;
 use crate::config::rete::model::{Node, RepoModel, Service, ServiceScope, VertexKind, VertexType};
 use crate::core::identity::{
     Kind, NodeScopableKind, SpiffeId, TrustDomain, build_id_in_rete, build_id_on_node,
@@ -95,8 +95,6 @@ pub struct TlsPrincipal {
     pub node: String,
     /// The groups this principal's roles grant it — what it may reach.
     pub granted: BTreeSet<String>,
-    /// Scope-relative cert and key, resolved by the agent against the rete root.
-    pub identity: Identity,
     /// How the principal is wired into flor locally.
     pub io: Vec<IoChannel>,
 }
@@ -273,7 +271,6 @@ fn node_tls_principals(
             id,
             node: node.to_string(),
             granted: granted_groups(model, &model.users[name].roles),
-            identity: identity_of(name),
             io: vec![IoChannel::Socks5 { listen }],
         });
     }
@@ -290,7 +287,6 @@ fn node_tls_principals(
             id: service_id(td, name, svc)?,
             node: node.to_string(),
             granted: granted_groups(model, &svc.roles),
-            identity: identity_of(name),
             io,
         });
     }
@@ -306,15 +302,6 @@ fn granted_groups(model: &RepoModel, roles: &[String]) -> BTreeSet<String> {
         .filter_map(|role| model.roles.get(role))
         .flat_map(|role| role.allow.iter().cloned())
         .collect()
-}
-
-/// A principal's identity material: bare filenames, resolved by the agent
-/// against the (flat) rete install root.
-fn identity_of(name: &str) -> Identity {
-    Identity {
-        cert_path: format!("{name}.crt").into(),
-        priv_path: format!("{name}.key").into(),
-    }
 }
 
 #[cfg(test)]

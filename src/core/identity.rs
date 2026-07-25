@@ -6,7 +6,8 @@
 //! SPIFFE-native: `SpiffeId` and `TrustDomain` are re-exported directly from the
 //! `spiffe` crate. We add a [`Kind`]/[`Scope`] projection over the SPIFFE path so
 //! the rest of the code base can reason about principal classes without parsing
-//! strings ad hoc.
+//! strings ad hoc. [`Store`] resolves those IDs into the material a node holds
+//! for them.
 //!
 //! See ADR-0005 in the florete docs for the design rationale.
 
@@ -14,12 +15,14 @@ pub mod ca;
 pub mod csr;
 pub mod dialable;
 pub mod kind;
+pub mod store;
 
 pub use ca::Ca;
 pub use csr::keygen_csr;
 pub use dialable::Dialable;
-pub use kind::{Kind, NodeScopableKind, Scope, kind_of, scope_of};
+pub use kind::{Kind, NodeScopableKind, Scope, kind_of, leaf_of, scope_of};
 pub use spiffe::{SpiffeId, TrustDomain, X509Bundle, X509Svid};
+pub use store::Store;
 
 use error_stack::{Report, ResultExt, bail};
 

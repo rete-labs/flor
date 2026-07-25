@@ -17,10 +17,10 @@ use std::sync::Arc;
 use error_stack::{Report, ResultExt, bail};
 
 use crate::config::artifact::model::vertex::{
-    Adapter, Identity, IoChannel, LinkRule, VertexMgmtPayload, Via,
+    Adapter, IoChannel, LinkRule, VertexMgmtPayload, Via,
 };
 use crate::config::artifact::{Envelope, VertexKind, version};
-use crate::core::identity::{SpiffeId, X509Svid, load_bundle_from_pem, load_svid_from_pem};
+use crate::core::identity::Store;
 use crate::core::transport::{
     AddrMap, EndpointAddr, QuicConnector, QuicPublisher, TransportBundle, TrustBundle,
 };
@@ -62,14 +62,18 @@ pub struct ConfigBundle {
 
 impl ConfigBundle {
     /// Load and build the runtime config for the vertex named `name` under the
-    /// rete root `root`: read `mgmt/vertices/<name>.json`, validate it, and
-    /// (for a link vertex) build the bundle, loading identity material from
-    /// `root`. A mesh vertex errors (its runtime is not implemented yet).
+    /// scope root `root`: read `mgmt/<name>.json`, validate it, and (for a link
+    /// vertex) build the bundle, resolving identity through the scope's store.
+    /// A mesh vertex errors (its runtime is not implemented yet).
+    ///
+    /// The mgmt set is flat — one `<name>.json` per workload — which is where
+    /// `retectl compile` puts it (see
+    /// [`NodeVertexArtifact::path`](crate::config::compile::NodeVertexArtifact::path)).
     ///
     /// Self-contained: it owns the read → validate → build sequence, so callers
     /// cannot skip validation or feed it the wrong kind.
     pub fn load(root: &Path, name: &str) -> Result<ConfigBundle, Report<Error>> {
-        let path = root.join("mgmt/vertices").join(format!("{name}.json"));
+        let path = root.join("mgmt").join(format!("{name}.json"));
         let bytes = std::fs::read(&path).change_context_lazy(|| {
             Error::new(format!("Failed to read vertex config {}", path.display()))
         })?;
@@ -109,9 +113,10 @@ impl ConfigBundle {
     }
 }
 
-/// Build the runtime bundle for a validated **link** payload, loading identity
-/// material from `root`. Assumes the payload is validated (single trust domain,
-/// dialable peers, …) — the only entry point is [`ConfigBundle::load`].
+/// Build the runtime bundle for a validated **link** payload, resolving every
+/// identity through the store at `root`. Assumes the payload is validated
+/// (single trust domain, dialable peers, …) — the only entry point is
+/// [`ConfigBundle::load`].
 fn build_link_bundle(
     payload: &VertexMgmtPayload,
     root: &Path,
@@ -121,21 +126,18 @@ fn build_link_bundle(
     // any file IO, so unsupported topologies fail fast and cheaply.
     let endpoint_addr = resolve_endpoint_addr(&payload.connection_manager.adapters)?;
 
-    // Trust bundle, in the rete's trust domain. Validation has confirmed every
-    // SPIFFE ID shares one trust domain, so any workload's is the rete's.
-    let workload = payload.workloads.first().ok_or_else(|| {
-        Report::new(Error::new(
-            "Link vertex has no workloads to derive the trust domain from",
-        ))
-    })?;
-    let trust_domain = workload.spiffe_id.trust_domain();
-    let ca_pem = std::fs::read(root.join(&payload.ca_cert_path)).change_context_lazy(|| {
+    // The artifact names principals; the store is what materializes them — and
+    // what says which rete this scope belongs to. The trust domain is never
+    // sampled off the config's own SPIFFE IDs: those are what gets *checked*
+    // against the anchor, so they cannot also be its source.
+    let store = Store::open(root).change_context_lazy(|| {
         Error::new(format!(
-            "Failed to read CA cert {}",
-            payload.ca_cert_path.display()
+            "Failed to open the identity store at {}",
+            root.display()
         ))
     })?;
-    let trust_bundle = load_bundle_from_pem(trust_domain, &ca_pem)
+    let trust_bundle = store
+        .trust_bundle()
         .change_context_lazy(|| Error::new("Failed to load the rete trust bundle"))?;
 
     // Dial table: each udp link member's peer -> its wire address.
@@ -152,7 +154,12 @@ fn build_link_bundle(
     let mut socks5 = Vec::new();
     let mut tcp = Vec::new();
     for workload in &payload.workloads {
-        let svid = load_workload_svid(root, &workload.identity, &workload.spiffe_id)?;
+        let svid = store.svid(&workload.spiffe_id).change_context_lazy(|| {
+            Error::new(format!(
+                "Failed to resolve the identity of workload {}",
+                workload.spiffe_id
+            ))
+        })?;
         for io in &workload.io {
             match io {
                 IoChannel::Socks5 { listen } => socks5.push((svid.clone(), *listen)),
@@ -202,42 +209,6 @@ fn resolve_endpoint_addr(adapters: &[Adapter]) -> Result<SocketAddr, Report<Erro
             "Link vertex must have exactly one udp connection-manager adapter"
         )),
     }
-}
-
-/// Load a workload's SVID from its (scope-relative) cert and key files,
-/// confirming the certified SPIFFE ID matches the one the config declares.
-fn load_workload_svid(
-    root: &Path,
-    identity: &Identity,
-    expected: &SpiffeId,
-) -> Result<X509Svid, Report<Error>> {
-    let cert = std::fs::read(root.join(&identity.cert_path)).change_context_lazy(|| {
-        Error::new(format!(
-            "Failed to read cert {}",
-            identity.cert_path.display()
-        ))
-    })?;
-    let key = std::fs::read(root.join(&identity.priv_path)).change_context_lazy(|| {
-        Error::new(format!(
-            "Failed to read key {}",
-            identity.priv_path.display()
-        ))
-    })?;
-    let svid = load_svid_from_pem(&cert, &key).change_context_lazy(|| {
-        Error::new(format!(
-            "Failed to load workload SVID from {}",
-            identity.cert_path.display()
-        ))
-    })?;
-    if svid.spiffe_id() != expected {
-        bail!(Error::new(format!(
-            "Workload cert {} certifies {}, but the config declares {}",
-            identity.cert_path.display(),
-            svid.spiffe_id(),
-            expected
-        )));
-    }
-    Ok(svid)
 }
 
 /// The assembled vertex runtime: the config plus the transport and northbound
@@ -333,37 +304,47 @@ mod tests {
         std::time::Duration::from_secs(3600)
     }
 
-    /// Mint an SVID for `uri`/`kind` from `ca` and write `<file>.crt`/`.key`
-    /// flat into the rete root `root`.
+    /// Lay down the store's trust anchor at `root`: the CA cert and the
+    /// trust-domain record enrollment ships beside it.
+    fn write_store(ca: &Ca, root: &Path) {
+        std::fs::write(root.join("ca.crt"), ca.cert_pem()).unwrap();
+        std::fs::write(
+            root.join("rete.json"),
+            json!({ "trust_domain": td().to_string() }).to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Mint an SVID for `uri`/`kind` from `ca` and file it in the store under
+    /// `certs/<file>.crt`/`.key` — where the consumer resolves it by leaf.
     fn write_svid(ca: &Ca, root: &Path, uri: &str, kind: Kind, file: &str) {
         let id = SpiffeId::new(uri).unwrap();
         let (key, csr) = keygen_csr(&id).unwrap();
         let leaf = ca.sign_csr(csr.as_bytes(), &id, kind, day()).unwrap();
-        std::fs::write(root.join(format!("{file}.crt")), leaf).unwrap();
-        std::fs::write(root.join(format!("{file}.key")), key.serialize_pem()).unwrap();
+        let certs = root.join("certs");
+        std::fs::create_dir_all(&certs).unwrap();
+        std::fs::write(certs.join(format!("{file}.crt")), leaf).unwrap();
+        std::fs::write(certs.join(format!("{file}.key")), key.serialize_pem()).unwrap();
     }
 
-    /// A minimal valid link payload: one udp adapter + one tcp-service workload
-    /// (`api.crt`/`api.key`).
+    /// A minimal valid link payload: one udp adapter + one tcp-service workload.
     fn one_workload_link() -> Value {
         json!({
             "schema_version": "1.0",
             "kind": "link",
-            "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
             "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "127.0.0.1:4433" } ] },
             "workloads": [
                 { "spiffe_id": "spiffe://demo.flor/service/alpha/api",
-                  "identity": { "cert_path": "api.crt", "priv_path": "api.key" },
                   "io": [ { "kind": "tcp", "upstream": "127.0.0.1:8000" } ] }
             ]
         })
     }
 
-    /// Write a full envelope `Value` to `mgmt/vertices/flor.json`, letting a test
-    /// set `schema_version` and inject unknown claims the wrapping helper can't.
+    /// Write a full envelope `Value` to `mgmt/flor.json`, letting a test set
+    /// `schema_version` and inject unknown claims the wrapping helper can't.
     fn write_envelope(root: &Path, env: Value) {
-        let dir = root.join("mgmt/vertices");
+        let dir = root.join("mgmt");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("flor.json"), serde_json::to_vec(&env).unwrap()).unwrap();
     }
@@ -373,7 +354,6 @@ mod tests {
         json!({
             "schema_version": "1.0",
             "plane": "mgmt",
-            "kind": "vertex",
             "version": 1,
             "node": "alpha",
             "name": "flor",
@@ -383,7 +363,7 @@ mod tests {
         })
     }
 
-    /// Write a mgmt vertex artifact wrapping `payload` to `mgmt/vertices/flor.json`.
+    /// Write a mgmt vertex artifact wrapping `payload` to `mgmt/flor.json`.
     fn write_artifact(root: &Path, payload: Value) {
         write_envelope(root, envelope_1_0(payload));
     }
@@ -393,7 +373,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let ca = Ca::init(&td(), day()).unwrap();
-        std::fs::write(root.join("ca.crt"), ca.cert_pem()).unwrap();
+        write_store(&ca, root);
         write_svid(
             &ca,
             root,
@@ -406,12 +386,10 @@ mod tests {
             json!({
                 "schema_version": "1.0",
                 "kind": "link",
-                "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
                 "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "127.0.0.1:4433" } ] },
                 "workloads": [
                     { "spiffe_id": "spiffe://demo.flor/service/alpha/api",
-                      "identity": { "cert_path": "api.crt", "priv_path": "api.key" },
                       "io": [
                           { "kind": "tcp", "upstream": "127.0.0.1:8000" },
                           { "kind": "socks5", "listen": "127.0.0.1:18000" }
@@ -447,7 +425,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let ca = Ca::init(&td(), day()).unwrap();
-        std::fs::write(root.join("ca.crt"), ca.cert_pem()).unwrap();
+        write_store(&ca, root);
         write_svid(
             &ca,
             root,
@@ -460,12 +438,10 @@ mod tests {
             json!({
                 "schema_version": "1.0",
                 "kind": "link",
-                "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
                 "connection_manager": { "adapters": [ { "name": "wire", "type": "udp" } ] },
                 "workloads": [
                     { "spiffe_id": "spiffe://demo.flor/user/alice",
-                      "identity": { "cert_path": "alice.crt", "priv_path": "alice.key" },
                       "io": [ { "kind": "socks5", "listen": "127.0.0.1:1080" } ] }
                 ],
                 "links": [ { "type": "list", "members": [
@@ -485,13 +461,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let ca = Ca::init(&td(), day()).unwrap();
-        std::fs::write(root.join("ca.crt"), ca.cert_pem()).unwrap();
+        write_store(&ca, root);
         write_artifact(
             root,
             json!({
                 "schema_version": "1.0",
                 "kind": "mesh",
-                "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
                 "connection_manager": { "adapters": [] },
                 "workloads": []
@@ -513,19 +488,17 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let ca = Ca::init(&td(), day()).unwrap();
-        std::fs::write(root.join("ca.crt"), ca.cert_pem()).unwrap();
+        write_store(&ca, root);
         // api.crt/.key intentionally not written.
         write_artifact(
             root,
             json!({
                 "schema_version": "1.0",
                 "kind": "link",
-                "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
                 "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "127.0.0.1:4433" } ] },
                 "workloads": [
                     { "spiffe_id": "spiffe://demo.flor/service/alpha/api",
-                      "identity": { "cert_path": "api.crt", "priv_path": "api.key" },
                       "io": [ { "kind": "tcp", "upstream": "127.0.0.1:8000" } ] }
                 ]
             }),
@@ -542,7 +515,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let ca = Ca::init(&td(), day()).unwrap();
-        std::fs::write(root.join("ca.crt"), ca.cert_pem()).unwrap();
+        write_store(&ca, root);
         // The file "api.crt" actually certifies a *different* identity.
         write_svid(
             &ca,
@@ -556,12 +529,10 @@ mod tests {
             json!({
                 "schema_version": "1.0",
                 "kind": "link",
-                "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
                 "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "127.0.0.1:4433" } ] },
                 "workloads": [
                     { "spiffe_id": "spiffe://demo.flor/service/alpha/api",
-                      "identity": { "cert_path": "api.crt", "priv_path": "api.key" },
                       "io": [ { "kind": "tcp", "upstream": "127.0.0.1:8000" } ] }
                 ]
             }),
@@ -615,31 +586,33 @@ mod tests {
     }
 
     #[test]
-    fn errors_on_link_without_workloads() {
-        // A workload-less link vertex has no identity to anchor the trust domain.
+    fn loads_a_link_vertex_without_workloads() {
+        // The trust domain comes from the store, not from the payload's SPIFFE
+        // IDs, so a workload-less link vertex is simply one with no bindings.
         let dir = tempdir().unwrap();
         let root = dir.path();
+        let ca = Ca::init(&td(), day()).unwrap();
+        write_store(&ca, root);
         write_artifact(
             root,
             json!({
                 "schema_version": "1.0",
                 "kind": "link",
-                "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
                 "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "127.0.0.1:4433" } ] },
                 "workloads": []
             }),
         );
 
-        let Err(err) = ConfigBundle::load(root, "flor") else {
-            panic!("expected a no-workloads error");
-        };
-        assert!(format!("{err:?}").contains("no workloads"), "{err:?}");
+        let bundle = ConfigBundle::load(root, "flor").unwrap();
+        assert_eq!(bundle.trust_bundle.0.trust_domain(), &td());
+        assert!(bundle.socks5_bindings.0.is_empty());
+        assert!(bundle.tcp_direct_bindings.0.is_empty());
     }
 
     #[test]
     fn errors_on_missing_vertex_config() {
-        // No `mgmt/vertices/flor.json` under the root.
+        // No `mgmt/flor.json` under the root.
         let dir = tempdir().unwrap();
         let Err(err) = ConfigBundle::load(dir.path(), "flor") else {
             panic!("expected a missing-config error");
@@ -651,17 +624,36 @@ mod tests {
     }
 
     #[test]
-    fn errors_on_missing_ca_cert() {
-        // Valid artifact, but `ca.crt` is absent (read fails before the workload
-        // identities are even loaded).
+    fn errors_on_missing_trust_domain_record() {
+        // A valid artifact is not enough: without `rete.json` nothing says which
+        // rete this scope belongs to, and the artifact must not be asked.
         let dir = tempdir().unwrap();
         let root = dir.path();
         write_artifact(root, one_workload_link());
 
         let Err(err) = ConfigBundle::load(root, "flor") else {
+            panic!("expected a missing-record error");
+        };
+        assert!(
+            format!("{err:?}").contains("trust-domain record"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn errors_on_missing_ca_cert() {
+        // The store knows its trust domain but holds no CA to anchor it.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let ca = Ca::init(&td(), day()).unwrap();
+        write_store(&ca, root);
+        std::fs::remove_file(root.join("ca.crt")).unwrap();
+        write_artifact(root, one_workload_link());
+
+        let Err(err) = ConfigBundle::load(root, "flor") else {
             panic!("expected a missing-CA error");
         };
-        assert!(format!("{err:?}").contains("CA cert"), "{err:?}");
+        assert!(format!("{err:?}").contains("rete CA"), "{err:?}");
     }
 
     #[test]
@@ -670,7 +662,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let ca = Ca::init(&td(), day()).unwrap();
-        std::fs::write(root.join("ca.crt"), ca.cert_pem()).unwrap();
+        write_store(&ca, root);
         write_svid(
             &ca,
             root,
@@ -678,13 +670,16 @@ mod tests {
             Kind::Service,
             "api",
         );
-        std::fs::remove_file(root.join("api.key")).unwrap();
+        std::fs::remove_file(root.join("certs/api.key")).unwrap();
         write_artifact(root, one_workload_link());
 
         let Err(err) = ConfigBundle::load(root, "flor") else {
             panic!("expected a missing-key error");
         };
-        assert!(format!("{err:?}").contains("Failed to read key"), "{err:?}");
+        assert!(
+            format!("{err:?}").contains("Failed to read the key"),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -693,15 +688,36 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let ca = Ca::init(&td(), day()).unwrap();
-        std::fs::write(root.join("ca.crt"), ca.cert_pem()).unwrap();
-        std::fs::write(root.join("api.crt"), b"not a pem cert").unwrap();
-        std::fs::write(root.join("api.key"), b"not a pem key").unwrap();
+        write_store(&ca, root);
+        let certs = root.join("certs");
+        std::fs::create_dir_all(&certs).unwrap();
+        std::fs::write(certs.join("api.crt"), b"not a pem cert").unwrap();
+        std::fs::write(certs.join("api.key"), b"not a pem key").unwrap();
         write_artifact(root, one_workload_link());
 
         let Err(err) = ConfigBundle::load(root, "flor") else {
             panic!("expected an SVID-load error");
         };
-        assert!(format!("{err:?}").contains("workload SVID"), "{err:?}");
+        assert!(format!("{err:?}").contains("SVID"), "{err:?}");
+    }
+
+    #[test]
+    fn errors_when_a_workload_is_absent_from_the_store() {
+        // The artifact names a principal the node holds no material for.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let ca = Ca::init(&td(), day()).unwrap();
+        write_store(&ca, root);
+        write_artifact(root, one_workload_link());
+
+        let Err(err) = ConfigBundle::load(root, "flor") else {
+            panic!("expected an unresolved-identity error");
+        };
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("spiffe://demo.flor/service/alpha/api"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -715,12 +731,10 @@ mod tests {
             json!({
                 "schema_version": "1.0",
                 "kind": "link",
-                "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
                 "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "127.0.0.1:4433" } ] },
                 "workloads": [
                     { "spiffe_id": "spiffe://demo.flor/service/alpha/api",
-                      "identity": { "cert_path": "api.crt", "priv_path": "api.key" },
                       "io": [] }
                 ]
             }),

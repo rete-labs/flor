@@ -9,6 +9,10 @@
 //! payload's own rules via [`ValidatePayload`]. The envelope check is written
 //! once on [`Envelope`]; each payload implements only `validate_payload`.
 //!
+//! `name` is what identifies an artifact — there is no envelope `kind` to
+//! cross-check a payload type against, so a consumer asking for the wrong
+//! schema surfaces as a parse failure, not a claim mismatch.
+//!
 //! This is **currently fail-fast**: it returns on the first problem. That is
 //! enough for the consumer-side gate (flor loading an artifact the operator
 //! already ran through `retectl validate`, and which — per ADR-0011 — the agent
@@ -52,7 +56,7 @@ impl ValidatePayload for VertexMgmtPayload {
 }
 
 /// Envelope-level checks, generic over any [`Payload`]: both supported schema
-/// versions, the `(plane, kind)` the payload declares, and the expected name.
+/// versions, the plane the payload declares, and the expected name.
 fn validate_envelope<P: Payload>(
     env: &Envelope<P>,
     expected_name: &str,
@@ -70,13 +74,9 @@ fn validate_envelope<P: Payload>(
             P::PLANE
         )));
     }
-    if env.kind != P::KIND {
-        bail!(Error::new(format!(
-            "Expected a {:?} artifact, got {:?}",
-            P::KIND,
-            env.kind
-        )));
-    }
+    // Name is the whole of dispatch: the caller states which artifact it came
+    // for, and `P` is the schema it decided that name implies. Nothing else in
+    // the envelope claims what kind of artifact this is.
     if env.name != expected_name {
         bail!(Error::new(format!(
             "Artifact names {:?}, expected {:?}",
@@ -215,13 +215,11 @@ mod tests {
         json!({
             "schema_version": "1.0",
             "kind": "link",
-            "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
             "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "0.0.0.0:4433" } ] },
             "workloads": [
                 {
                     "spiffe_id": "spiffe://demo.flor/service/alpha/api",
-                    "identity": { "cert_path": "api.crt", "priv_path": "api.key" },
                     "io": [ { "kind": "tcp", "upstream": "127.0.0.1:8000" } ]
                 }
             ],
@@ -241,7 +239,6 @@ mod tests {
         json!({
             "schema_version": "1.0",
             "plane": "mgmt",
-            "kind": "vertex",
             "version": 42,
             "node": "alpha",
             "name": "flor",
@@ -310,17 +307,6 @@ mod tests {
         let err = parse(v).validate("flor").unwrap_err();
         assert!(
             format!("{err:?}").to_lowercase().contains("mgmt"),
-            "{err:?}"
-        );
-    }
-
-    #[test]
-    fn rejects_non_vertex_kind() {
-        let mut v = envelope_with(valid_payload());
-        v["kind"] = json!("agent");
-        let err = parse(v).validate("flor").unwrap_err();
-        assert!(
-            format!("{err:?}").to_lowercase().contains("vertex"),
             "{err:?}"
         );
     }
@@ -433,7 +419,6 @@ mod tests {
         let mesh = json!({
             "schema_version": "1.0",
             "kind": "mesh",
-            "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
             "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "0.0.0.0:4433" } ] },
             "workloads": [],
@@ -452,7 +437,6 @@ mod tests {
         let mesh = json!({
             "schema_version": "1.0",
             "kind": "mesh",
-            "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
             "connection_manager": { "adapters": [ { "name": "wire", "type": "udp", "listen": "0.0.0.0:4433" } ] },
             "workloads": [],
@@ -473,7 +457,6 @@ mod tests {
         let mesh = json!({
             "schema_version": "1.0",
             "kind": "mesh",
-            "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
             "connection_manager": { "adapters": [] },
             "workloads": [],
