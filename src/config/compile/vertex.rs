@@ -24,15 +24,12 @@ use crate::config::artifact::model::vertex::{
     Acl, Adapter, ConnectionManager, LinkMember, LinkRule, TransportEndpoint, Via, Workload,
 };
 use crate::config::artifact::{
-    ArtifactKind, Envelope, Plane, Signature, VertexKind, VertexMgmtPayload,
+    ArtifactKind, Envelope, Plane, Signature, VertexKind, VertexMgmtPayload, version,
 };
 use crate::core::identity::SpiffeId;
 
 use super::plan::{NodePlan, Plan, Target, TlsPrincipal};
 use super::{CompileOpts, Error, NodeVertexArtifact};
-
-/// The compiled-artifact contract version this compiler emits.
-const SCHEMA_VERSION: &str = "1.0";
 
 /// The rete CA, as the flat install root holds it.
 const CA_CERT_FILE: &str = "ca.crt";
@@ -61,6 +58,10 @@ pub fn project(
     let reach = reachable(plan, node);
 
     let payload = VertexMgmtPayload {
+        // Both stamps come from the contract constants the consumer gates
+        // against, so producer and consumer cannot drift. Each is the lowest
+        // minor this content needs — trivially so while only 1.0 exists.
+        schema_version: version::VERTEX.stamp(),
         kind: VertexKind::Link,
         ca_cert_path: CA_CERT_FILE.into(),
         transport_endpoint: TransportEndpoint::Quic,
@@ -87,7 +88,7 @@ pub fn project(
         node: node.to_string(),
         vertex_name: node_plan.link_vertex.name.clone(),
         envelope: Envelope {
-            schema_version: SCHEMA_VERSION.to_string(),
+            schema_version: version::ENVELOPE.stamp(),
             plane: Plane::Mgmt,
             kind: ArtifactKind::Vertex,
             version: opts.version,

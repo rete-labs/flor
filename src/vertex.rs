@@ -78,16 +78,20 @@ impl ConfigBundle {
         // version skew (a newer, unsupported schema whose added field/variant our
         // strict types reject → an actionable upgrade error) from an artifact
         // that is genuinely malformed for a supported version (preserve the parse
-        // error — it signals a mis-stamped or corrupt artifact, not skew).
+        // error — it signals a mis-stamped or corrupt artifact, not skew). It
+        // probes both ladders, since either the envelope's or the vertex payload
+        // family's minor can be what our types choked on.
         let env: Envelope<VertexMgmtPayload> = match serde_json::from_slice(&bytes) {
             Ok(env) => env,
             Err(parse_err) => {
-                version::precheck_schema_version(&bytes).change_context_lazy(|| {
-                    Error::new(format!(
-                        "Vertex artifact {} has an unsupported schema",
-                        path.display()
-                    ))
-                })?;
+                version::precheck_schema_version::<VertexMgmtPayload>(&bytes).change_context_lazy(
+                    || {
+                        Error::new(format!(
+                            "Vertex artifact {} has an unsupported schema",
+                            path.display()
+                        ))
+                    },
+                )?;
                 return Err(Report::new(parse_err)
                     .change_context(Error::new(format!("Failed to parse {}", path.display()))));
             }
@@ -343,6 +347,7 @@ mod tests {
     /// (`api.crt`/`api.key`).
     fn one_workload_link() -> Value {
         json!({
+            "schema_version": "1.0",
             "kind": "link",
             "ca_cert_path": "ca.crt",
             "transport_endpoint": { "type": "quic" },
@@ -399,6 +404,7 @@ mod tests {
         write_artifact(
             root,
             json!({
+                "schema_version": "1.0",
                 "kind": "link",
                 "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
@@ -452,6 +458,7 @@ mod tests {
         write_artifact(
             root,
             json!({
+                "schema_version": "1.0",
                 "kind": "link",
                 "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
@@ -482,6 +489,7 @@ mod tests {
         write_artifact(
             root,
             json!({
+                "schema_version": "1.0",
                 "kind": "mesh",
                 "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
@@ -510,6 +518,7 @@ mod tests {
         write_artifact(
             root,
             json!({
+                "schema_version": "1.0",
                 "kind": "link",
                 "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
@@ -545,6 +554,7 @@ mod tests {
         write_artifact(
             root,
             json!({
+                "schema_version": "1.0",
                 "kind": "link",
                 "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
@@ -612,6 +622,7 @@ mod tests {
         write_artifact(
             root,
             json!({
+                "schema_version": "1.0",
                 "kind": "link",
                 "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
@@ -702,6 +713,7 @@ mod tests {
         write_artifact(
             root,
             json!({
+                "schema_version": "1.0",
                 "kind": "link",
                 "ca_cert_path": "ca.crt",
                 "transport_endpoint": { "type": "quic" },
@@ -756,6 +768,47 @@ mod tests {
             panic!("expected an unsupported-schema error");
         };
         let msg = format!("{err:?}");
+        assert!(msg.contains("upgrade"), "{msg}");
+        assert!(!msg.contains("unknown field"), "leaked serde error: {msg}");
+    }
+
+    #[test]
+    fn load_reports_upgrade_for_newer_payload_minor_alone() {
+        // The payload family versions independently, so a *current* envelope
+        // does not vouch for the payload. Nothing here fails the strict parse —
+        // only the payload gate stands between us and applying an artifact whose
+        // rules we do not implement.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let mut payload = one_workload_link();
+        payload["schema_version"] = json!("1.1");
+        write_envelope(root, envelope_1_0(payload));
+
+        let Err(err) = ConfigBundle::load(root, "flor") else {
+            panic!("expected an unsupported-schema error");
+        };
+        let msg = format!("{err:?}");
+        assert!(msg.contains("vertex payload"), "{msg}");
+        assert!(msg.contains("upgrade"), "{msg}");
+    }
+
+    #[test]
+    fn load_reports_upgrade_for_newer_payload_minor_with_unknown_payload_field() {
+        // Same skew, but the 1.1 payload also carries the field that minor added,
+        // so the strict parse fails first and the diagnosis falls to the probe.
+        // The envelope is current, so only the payload ladder can explain it.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let mut payload = one_workload_link();
+        payload["schema_version"] = json!("1.1");
+        payload["future_payload_field"] = json!(true);
+        write_envelope(root, envelope_1_0(payload));
+
+        let Err(err) = ConfigBundle::load(root, "flor") else {
+            panic!("expected an unsupported-schema error");
+        };
+        let msg = format!("{err:?}");
+        assert!(msg.contains("vertex payload"), "{msg}");
         assert!(msg.contains("upgrade"), "{msg}");
         assert!(!msg.contains("unknown field"), "leaked serde error: {msg}");
     }

@@ -115,7 +115,7 @@ mod tests {
     use std::net::SocketAddr;
 
     use crate::config::artifact::model::vertex::{Adapter, IoChannel, LinkRule};
-    use crate::config::artifact::{ArtifactKind, Plane};
+    use crate::config::artifact::{ArtifactKind, Plane, version};
     use crate::config::rete::{LoadOpts, load};
 
     use super::*;
@@ -332,6 +332,19 @@ users:
             "spiffe://rete-lovers/management-plane/primary"
         );
         assert_eq!(env.signature.alg, "none");
+    }
+
+    #[test]
+    fn both_schema_ladders_are_stamped_from_the_contract_constants() {
+        // Producer and consumer must read one source of truth, so what the
+        // compiler stamps is exactly what the consumer's gate accepts.
+        let artifacts = all(RETE_LOVERS);
+        let env = &node(&artifacts, "alpha").envelope;
+        assert_eq!(env.schema_version, version::ENVELOPE.stamp());
+        assert_eq!(env.payload.schema_version, version::VERTEX.stamp());
+        // Whatever it stamped, the artifact passes its own gate — `compile`
+        // already validates every artifact, so this pins the round trip.
+        env.validate("public").unwrap();
     }
 
     /// The user-node payload from validate-and-compile.mdx: an initiator-only
