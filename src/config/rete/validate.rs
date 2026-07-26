@@ -42,8 +42,6 @@ pub enum Rule {
     WorkloadVertexBinding,
     /// Services without `roles` may only be targets (no socks5_proxy without roles).
     PrincipalRoleCoherence,
-    /// No two local SOCKS5 listeners on a node share an address.
-    LocalPortUniqueness,
 }
 
 impl fmt::Display for Rule {
@@ -58,7 +56,6 @@ impl fmt::Display for Rule {
             Rule::VertexGraphReachability => "vertex graph reachability",
             Rule::WorkloadVertexBinding => "workload vertex binding",
             Rule::PrincipalRoleCoherence => "principal role coherence",
-            Rule::LocalPortUniqueness => "local-port uniqueness",
         };
         f.write_str(s)
     }
@@ -78,7 +75,6 @@ pub fn validate(model: &RepoModel) -> Vec<Violation> {
     check_vertex_graph_reachability(model, &mut out);
     check_workload_vertex_binding(model, &mut out);
     check_principal_role_coherence(model, &mut out);
-    check_local_port_uniqueness(model, &mut out);
     out
 }
 
@@ -526,56 +522,6 @@ fn check_principal_role_coherence(model: &RepoModel, out: &mut Vec<Violation>) {
                      but declares no `roles`; add a `roles:` entry to grant egress access"
                 ),
             });
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Rule::LocalPortUniqueness
-// ---------------------------------------------------------------------------
-
-fn check_local_port_uniqueness(model: &RepoModel, out: &mut Vec<Violation>) {
-    // Services and user devices each declare a loopback SOCKS5 listener. On a
-    // given node no two may share an address, or the second would fail to bind.
-    // (The node agent's listener is allocated by the compiler to avoid these,
-    // so it never participates.)
-    use std::collections::HashMap;
-    use std::collections::hash_map::Entry;
-    use std::net::SocketAddr;
-
-    // (node, listen) -> the subject that first claimed it.
-    let mut claimed: HashMap<(&str, SocketAddr), String> = HashMap::new();
-
-    let listeners = model
-        .services
-        .iter()
-        .filter_map(|(name, svc)| {
-            svc.socks5_proxy
-                .map(|listen| (svc.at.as_str(), listen, format!("service '{name}'")))
-        })
-        .chain(model.users.iter().flat_map(|(name, user)| {
-            user.nodes.iter().map(move |entry| {
-                (
-                    entry.at.as_str(),
-                    entry.socks5_proxy,
-                    format!("user '{name}' (device on '{}')", entry.at),
-                )
-            })
-        }));
-
-    for (node, listen, subject) in listeners {
-        match claimed.entry((node, listen)) {
-            Entry::Occupied(prior) => out.push(Violation {
-                rule: Rule::LocalPortUniqueness,
-                message: format!(
-                    "SOCKS5 listener {listen} on node '{node}' is claimed by both \
-                     {} and {subject}",
-                    prior.get()
-                ),
-            }),
-            Entry::Vacant(slot) => {
-                slot.insert(subject);
-            }
         }
     }
 }
@@ -1435,95 +1381,5 @@ mod tests {
         );
         let violations = validate(&model);
         assert_eq!(count(&violations, Rule::PrincipalRoleCoherence), 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // Rule::LocalPortUniqueness
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn local_port_uniqueness_two_users_on_a_node_share_a_port() {
-        let mut model = minimal_valid_model();
-        for name in ["bob", "carol"] {
-            model.users.insert(
-                name.into(),
-                User {
-                    roles: vec![],
-                    nodes: vec![UserNode {
-                        at: "mgmt".into(),
-                        via: None,
-                        socks5_proxy: "127.0.0.1:1080".parse().unwrap(),
-                    }],
-                },
-            );
-        }
-        let violations = validate(&model);
-        assert_eq!(count(&violations, Rule::LocalPortUniqueness), 1);
-        assert!(
-            violations
-                .iter()
-                .find(|v| v.rule == Rule::LocalPortUniqueness)
-                .unwrap()
-                .message
-                .contains("127.0.0.1:1080")
-        );
-    }
-
-    #[test]
-    fn local_port_uniqueness_user_and_service_share_a_port() {
-        let mut model = minimal_valid_model();
-        model.services.insert(
-            "client-svc".into(),
-            Service {
-                at: "mgmt".into(),
-                via: None,
-                // `addr` is the service's upstream (an outbound `tcp` target),
-                // not a SOCKS5 listener — the uniqueness rule never inspects it.
-                // The only collision under test is the shared `127.0.0.1:1080`
-                // SOCKS5 listener below and on the user device.
-                addr: "127.0.0.1:8080".parse().unwrap(),
-                socks5_proxy: Some("127.0.0.1:1080".parse().unwrap()),
-                groups: vec![],
-                roles: vec!["node".into()],
-                scope: None,
-            },
-        );
-        model.users.insert(
-            "bob".into(),
-            User {
-                roles: vec![],
-                nodes: vec![UserNode {
-                    at: "mgmt".into(),
-                    via: None,
-                    socks5_proxy: "127.0.0.1:1080".parse().unwrap(),
-                }],
-            },
-        );
-        let violations = validate(&model);
-        assert_eq!(count(&violations, Rule::LocalPortUniqueness), 1);
-    }
-
-    #[test]
-    fn local_port_uniqueness_same_port_on_different_nodes_passes() {
-        let mut model = minimal_valid_model();
-        model.nodes.insert(
-            "other".into(),
-            node_with_quic_link("quic0", Some("9.9.9.9:4433")),
-        );
-        for (name, at) in [("bob", "mgmt"), ("carol", "other")] {
-            model.users.insert(
-                name.into(),
-                User {
-                    roles: vec![],
-                    nodes: vec![UserNode {
-                        at: at.into(),
-                        via: None,
-                        socks5_proxy: "127.0.0.1:1080".parse().unwrap(),
-                    }],
-                },
-            );
-        }
-        let violations = validate(&model);
-        assert_eq!(count(&violations, Rule::LocalPortUniqueness), 0);
     }
 }
