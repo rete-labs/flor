@@ -388,10 +388,11 @@ users:
         let alpha = node(&artifacts, "alpha");
         let payload = &alpha.envelope.payload;
 
-        // The declared public address becomes a bind on an unspecified host.
+        // The declared address is what the adapter binds — as authored, host
+        // included. The compiler invents no bind address of its own.
         assert_eq!(
             adapter_listen(alpha),
-            Some("0.0.0.0:4433".parse::<SocketAddr>().unwrap())
+            Some("1.2.3.4:4433".parse::<SocketAddr>().unwrap())
         );
 
         // api is both a target (tcp upstream) and an initiator (its own socks5).
@@ -432,6 +433,34 @@ users:
             ["spiffe://rete-lovers/service/api"]
         );
         assert_eq!(link_names(alpha), ["kafka", "mongodb"]);
+    }
+
+    /// The authored address reaches the adapter untouched — host and port both.
+    ///
+    /// One source field serves two roles here: what peers dial and what the
+    /// node binds. Rewriting the host (as the compiler once did, to an
+    /// unspecified one) or remapping the port would make the two disagree
+    /// silently, so pin the copy. Splitting the roles into separate advertised
+    /// and `listen` fields is C1 work.
+    #[test]
+    fn declared_address_is_bound_as_authored() {
+        let artifacts = all(RETE_LOVERS);
+
+        for (node_name, address) in [
+            ("mgmt01", "9.10.11.12:4433"),
+            ("alpha", "1.2.3.4:4433"),
+            ("beta", "5.6.7.8:4433"),
+        ] {
+            assert_eq!(
+                adapter_listen(node(&artifacts, node_name)),
+                Some(address.parse::<SocketAddr>().unwrap()),
+                "node '{node_name}' must bind its declared address verbatim"
+            );
+        }
+
+        // An initiator-only node declares none, so the adapter binds nothing
+        // and the runtime takes an ephemeral port.
+        assert_eq!(adapter_listen(node(&artifacts, "alice-laptop")), None);
     }
 
     #[test]

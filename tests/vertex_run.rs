@@ -349,8 +349,8 @@ fn compiler_output_loads_in_the_vertex_runtime() {
 
     let config = ConfigBundle::load(&node_root, "public").unwrap();
 
-    // The compiled `address: 1.2.3.4:4433` binds unspecified on the same port.
-    assert_eq!(config.endpoint_addr.0.to_string(), "0.0.0.0:4433");
+    // The compiled `address: 1.2.3.4:4433` reaches the endpoint as authored.
+    assert_eq!(config.endpoint_addr.0.to_string(), "1.2.3.4:4433");
     assert_eq!(
         config.trust_bundle.0.trust_domain().to_string(),
         TRUST_DOMAIN

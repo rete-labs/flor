@@ -16,7 +16,7 @@
 //! compile step promises.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 
 use error_stack::{Report, ResultExt, bail};
 
@@ -61,26 +61,20 @@ pub struct VertexPlan {
     /// The vertex's name; also the artifact's `name`, its filename, and the
     /// `<name>` segment of the vertex's `vertex/<node>/<name>` SPIFFE ID.
     pub name: String,
-    /// Where peers reach this vertex. `None` for initiator-only nodes (no
-    /// `address` — laptops behind NAT).
-    pub address: Option<SocketAddr>,
-}
-
-impl VertexPlan {
-    /// What the wire adapter binds: the declared port on an unspecified host.
+    /// Where peers reach this vertex, and what its wire adapter binds — the
+    /// source's `address`, used as authored. The compiler derives no bind
+    /// address of its own: an operator on a multi-interface node picks the
+    /// interface by naming it here.
     ///
-    /// The source states where peers *reach* the vertex; the public IP may not
-    /// exist on any local NIC (NAT, load balancer, floating address), so what
-    /// the socket binds is the compiler's business.
-    pub fn listen(&self) -> Option<SocketAddr> {
-        self.address.map(|address| {
-            let host = match address {
-                SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            };
-            SocketAddr::new(host, address.port())
-        })
-    }
+    /// One field therefore serves both roles, which means the address has to be
+    /// one the node can actually bind. Splitting it into an advertised address
+    /// and a separate `listen` — what NAT, floating addresses and port
+    /// forwarding need — waits for C1, where a node has several link vertices
+    /// and the distinction starts paying for itself.
+    ///
+    /// `None` for initiator-only nodes (no `address` — laptops behind NAT),
+    /// which bind an ephemeral port instead.
+    pub address: Option<SocketAddr>,
 }
 
 /// A TLS principal resolved on one node: an entity that holds an SVID (cert+key)
