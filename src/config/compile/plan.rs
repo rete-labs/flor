@@ -227,9 +227,8 @@ fn node_plan(name: &str, node: &Node) -> Result<NodePlan, Report<Error>> {
 /// Every TLS principal whose identity material lives on `node`: the users with a
 /// device here and the services hosted here.
 ///
-/// Any SOCKS5 listener a principal exposes is authored in the source, not
-/// allocated here; keeping those listeners unique on a node is a validator
-/// concern ([`super::super::rete::validate`]).
+/// Any SOCKS5 listener a principal exposes is authored in the source and
+/// projected verbatim; nothing here allocates one.
 fn node_tls_principals(
     model: &RepoModel,
     td: &TrustDomain,

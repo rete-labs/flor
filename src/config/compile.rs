@@ -10,7 +10,7 @@
 //!
 //! Two stages, mirroring what the compiled artifact needs to say:
 //! - [`plan`] resolves the whole rete once — SPIFFE IDs, role→group expansion,
-//!   local port allocation, per-node placement.
+//!   per-node placement.
 //! - [`vertex`] projects that resolved view onto a single node, keeping only the
 //!   identity references and ACL rows relevant to its own workloads.
 //!
