@@ -63,7 +63,7 @@ pub fn project(
         connection_manager: ConnectionManager {
             adapters: vec![Adapter::Udp {
                 name: WIRE_ADAPTER.to_string(),
-                listen: node_plan.link_vertex.listen(),
+                listen: node_plan.link_vertex.address,
             }],
         },
         workloads: locals

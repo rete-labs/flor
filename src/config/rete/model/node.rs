@@ -18,7 +18,9 @@ pub struct Vertex {
     pub kind: VertexKind,
     #[serde(rename = "type")]
     pub vertex_type: VertexType,
-    /// Listen address; absent on initiator-only nodes.
+    /// Where peers reach this vertex, and what it binds — the compiler uses it
+    /// as authored for both, so it must be an address the node can bind.
+    /// Absent on initiator-only nodes.
     pub address: Option<SocketAddr>,
 }
 

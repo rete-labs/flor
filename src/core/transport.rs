@@ -58,9 +58,15 @@ impl TransportBundle {
     pub fn try_new(deps: impl Into<TransportDeps>) -> Result<Self, ErrorReport<Error>> {
         let deps = deps.into();
         let resolver = Arc::new(UdpResolver::new(deps.addr_map.0));
-        let socket = std::net::UdpSocket::bind(deps.endpoint_addr.0).change_context(Error(
-            format!("Failed to bind UDP socket to {}", deps.endpoint_addr.0),
-        ))?;
+        // The artifact's `listen` is the operator's address, used as authored —
+        // so a node with no such interface fails here rather than at compile
+        // time, and the message has to say which address it could not claim.
+        let socket =
+            std::net::UdpSocket::bind(deps.endpoint_addr.0).change_context(Error(format!(
+                "Failed to bind UDP socket to {}: no local interface holds that \
+                 address, or it is already in use",
+                deps.endpoint_addr.0
+            )))?;
         let (connector, publisher, handle) = endpoint::actor::QuicEndpointActor::spawn_new(
             resolver.clone(),
             socket,
