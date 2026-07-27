@@ -19,7 +19,7 @@ use error_stack::{Report, ResultExt, bail};
 use crate::config::artifact::model::vertex::{
     Adapter, IoChannel, LinkRule, VertexMgmtPayload, Via,
 };
-use crate::config::artifact::{Envelope, VertexKind, version};
+use crate::config::artifact::{Envelope, Expect, VertexKind, version};
 use crate::core::identity::Store;
 use crate::core::transport::{
     AddrMap, EndpointAddr, QuicConnector, QuicPublisher, TransportBundle, TrustBundle,
@@ -66,9 +66,10 @@ impl ConfigBundle {
     /// vertex) build the bundle, resolving identity through the scope's store.
     /// A mesh vertex errors (its runtime is not implemented yet).
     ///
-    /// The mgmt set is flat — one `<name>.json` per workload — which is where
-    /// `retectl compile` puts it (see
-    /// [`NodeVertexArtifact::path`](crate::config::compile::NodeVertexArtifact::path)).
+    /// The mgmt set is flat — one `<name>.json` per workload, located by name
+    /// alone. That is the layout `flor agent` lays down for the workloads it
+    /// supervises; how the set reached the node is none of the vertex's
+    /// business.
     ///
     /// Self-contained: it owns the read → validate → build sequence, so callers
     /// cannot skip validation or feed it the wrong kind.
@@ -100,12 +101,13 @@ impl ConfigBundle {
                     .change_context(Error::new(format!("Failed to parse {}", path.display()))));
             }
         };
-        env.validate(name).change_context_lazy(|| {
-            Error::new(format!(
-                "Vertex artifact {} failed validation",
-                path.display()
-            ))
-        })?;
+        env.validate(Expect::new(name).check_payload())
+            .change_context_lazy(|| {
+                Error::new(format!(
+                    "Vertex artifact {} failed validation",
+                    path.display()
+                ))
+            })?;
         match env.payload.kind {
             VertexKind::Link => build_link_bundle(&env.payload, root),
             VertexKind::Mesh => bail!(Error::new("Mesh vertex runtime not yet implemented")),
@@ -168,11 +170,10 @@ fn build_link_bundle(
                 // wires it into the inbound/outbound path. Warn rather than skip
                 // silently so a mis-provisioned workload is visible until the C1
                 // FlorIO runtime lands.
-                IoChannel::Florio { socket } => log::warn!(
-                    "Workload {} declares a FlorIO io channel ({}); FlorIO is not \
+                IoChannel::Florio {} => log::warn!(
+                    "Workload {} declares a FlorIO io channel; FlorIO is not \
                      implemented in C0 and this channel is ignored",
-                    workload.spiffe_id,
-                    socket.display()
+                    workload.spiffe_id
                 ),
             }
         }
@@ -575,7 +576,7 @@ mod tests {
             vec![udp("wire", None), udp("wire2", None)],
             vec![Adapter::Florio {
                 name: "io".to_string(),
-                socket: "/run/flor.sock".into(),
+                vertex: "public".to_string(),
             }],
         ] {
             let Err(err) = resolve_endpoint_addr(&adapters) else {

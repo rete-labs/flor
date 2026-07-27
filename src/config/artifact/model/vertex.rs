@@ -12,13 +12,14 @@
 //! `kind`. An io channel's direction is intrinsic to its `kind` (no
 //! `direction` field) — see [`IoChannel::direction`].
 //!
-//! **No identity paths.** A workload names its principal by SPIFFE ID and the
-//! node's [identity store](crate::core::identity::Store) materializes it, so the
-//! same compiled JSON is valid wherever the scope root lives and on any OS. The
-//! only paths here are local socket addresses a FlorIO channel binds.
+//! **No filesystem paths at all.** A workload names its principal by SPIFFE ID
+//! and the node's [identity store](crate::core::identity::Store) materializes
+//! it; a FlorIO adapter names the *vertex* that serves it, and the socket path
+//! is a runtime convention over the spawn-injected runtime root
+//! (`<runtime-root>/vertices/<vertex-name>.sock`), never a compiled field. So
+//! the same compiled JSON is valid wherever the scope root lives and on any OS.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -103,8 +104,10 @@ pub enum Adapter {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         listen: Option<SocketAddr>,
     },
-    /// A FlorIO socket that delegates dialing to a layer below.
-    Florio { name: String, socket: PathBuf },
+    /// A FlorIO channel that delegates dialing to the layer below, naming the
+    /// vertex that serves it — the socket path is derived at runtime from that
+    /// name and the injected runtime root, never carried here.
+    Florio { name: String, vertex: String },
 }
 
 impl Adapter {
@@ -140,8 +143,9 @@ pub enum IoChannel {
     Socks5 { listen: SocketAddr },
     /// Outbound: flor delivers inbound connections to this upstream.
     Tcp { upstream: SocketAddr },
-    /// Bidirectional: a recursive flor layer.
-    Florio { socket: PathBuf },
+    /// Bidirectional: a recursive flor layer. Carries nothing — the serving
+    /// vertex derives the socket path from its own name at runtime.
+    Florio {},
 }
 
 impl IoChannel {
@@ -425,15 +429,15 @@ mod tests {
 
     #[test]
     fn florio_adapter_and_io_parse() {
-        // Exercise the FlorIO variants (socket-bearing, bidirectional).
+        // Exercise the FlorIO variants (vertex-named, bidirectional).
         let v = json!({
             "schema_version": "1.0",
             "kind": "mesh",
             "transport_endpoint": { "type": "quic" },
-            "connection_manager": { "adapters": [ { "name": "io", "type": "florio", "socket": "/run/flor.sock" } ] },
+            "connection_manager": { "adapters": [ { "name": "io", "type": "florio", "vertex": "public" } ] },
             "workloads": [
                 { "spiffe_id": "spiffe://rete-lovers/vertex/alpha/rete",
-                  "io": [ { "kind": "florio", "socket": "/run/wl.sock" } ] }
+                  "io": [ { "kind": "florio" } ] }
             ],
             "links": [
                 { "type": "list", "members": [
@@ -443,9 +447,9 @@ mod tests {
         });
         let p: VertexMgmtPayload = serde_json::from_value(v).unwrap();
         match &p.connection_manager.adapters[0] {
-            Adapter::Florio { name, socket } => {
+            Adapter::Florio { name, vertex } => {
                 assert_eq!(name, "io");
-                assert_eq!(socket, &PathBuf::from("/run/flor.sock"));
+                assert_eq!(vertex, "public");
             }
             other => panic!("expected florio adapter, got {other:?}"),
         }
@@ -478,10 +482,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_the_dropped_identity_path_fields() {
-        // Artifacts carry no filesystem references. The closed schema is what
-        // stops an artifact compiled against the older shape from loading with
-        // its paths silently ignored.
+    fn rejects_the_dropped_path_fields() {
+        // Artifacts carry no filesystem references — identity material and
+        // FlorIO sockets alike. The closed schema is what stops an artifact
+        // compiled against the older shape from loading with its paths
+        // silently ignored.
         let mut v = user_node();
         v["ca_cert_path"] = json!("ca.crt");
         assert!(
@@ -494,6 +499,21 @@ mod tests {
         assert!(
             serde_json::from_value::<VertexMgmtPayload>(v).is_err(),
             "per-workload identity paths must be rejected"
+        );
+
+        let mut v = user_node();
+        v["connection_manager"]["adapters"] =
+            json!([ { "name": "io", "type": "florio", "socket": "/run/flor.sock" } ]);
+        assert!(
+            serde_json::from_value::<VertexMgmtPayload>(v).is_err(),
+            "a florio adapter socket path must be rejected"
+        );
+
+        let mut v = user_node();
+        v["workloads"][0]["io"] = json!([ { "kind": "florio", "socket": "/run/wl.sock" } ]);
+        assert!(
+            serde_json::from_value::<VertexMgmtPayload>(v).is_err(),
+            "a florio io socket path must be rejected"
         );
     }
 

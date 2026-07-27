@@ -15,6 +15,7 @@ pub mod validate;
 pub mod version;
 
 pub use model::{Envelope, Payload, Plane, PlaneTag, Signature, VertexKind, VertexMgmtPayload};
+pub use validate::Expect;
 
 /// An artifact validation or resolution failure.
 #[derive(Debug, thiserror::Error)]

@@ -4,14 +4,27 @@
 //! Semantic validation of compiled artifacts — the checks beyond what serde's
 //! structural parse already guarantees.
 //!
-//! `env.validate(name)` checks the envelope identifies the expected artifact
-//! (generic over the payload's declared [`Payload`] cell), then runs that
-//! payload's own rules via [`ValidatePayload`]. The envelope check is written
-//! once on [`Envelope`]; each payload implements only `validate_payload`.
+//! Consumers differ in what they know about the artifact they asked for, so
+//! there is **one entry point**, [`Envelope::validate`], and each check is
+//! opted into through [`Expect`] by the consumer that can make it:
 //!
-//! `name` is what identifies an artifact — there is no envelope `kind` to
-//! cross-check a payload type against, so a consumer asking for the wrong
-//! schema surfaces as a parse failure, not a claim mismatch.
+//! - the envelope contract's own version ladder runs by default. It is not a
+//!   claim about this consumer's context but what makes the rest of the struct
+//!   readable at all, so only a relay — which reads the frozen routing core and
+//!   nothing else, and never gates (ADR-0012) — waives it, with
+//!   [`Expect::skip_envelope_schema_version`].
+//! - `name`, `plane` and `node` are claims the caller's context supplies, and
+//!   are checked only against what it states. A claim a consumer cannot know is
+//!   left unset: a workload is handed its config and has no independent notion
+//!   of the node it runs on, so it does not state one.
+//! - [`Expect::check_payload`] adds the payload type's own claims — the plane its
+//!   family lives on, that family's version ladder, and the payload's rules
+//!   ([`ValidatePayload`]). It exists only where the payload parses, so `flor
+//!   agent` handing down an artifact whose payload it does not know, or a relay
+//!   moving one on the frozen core alone, simply leaves it off.
+//!
+//! No consumer is asked to gate a claim it cannot interpret, and none has to
+//! restate one the payload type already fixes.
 //!
 //! This is **currently fail-fast**: it returns on the first problem. That is
 //! enough for the consumer-side gate (flor loading an artifact the operator
@@ -26,7 +39,7 @@ use crate::core::identity::{Dialable, SpiffeId};
 
 use super::Error;
 use super::model::vertex::{Adapter, LinkRule, VertexKind, VertexMgmtPayload, Via};
-use super::model::{Envelope, Payload};
+use super::model::{Envelope, Payload, PlaneTag};
 use super::version;
 
 /// A payload's own semantic rules, run after the generic envelope checks.
@@ -35,12 +48,127 @@ pub trait ValidatePayload: Payload {
     fn validate_payload(&self) -> Result<(), Report<Error>>;
 }
 
-impl<P: ValidatePayload> Envelope<P> {
-    /// Validate this artifact is well-formed and names `expected_name`: the
-    /// generic envelope checks, then the payload's own rules.
-    pub fn validate(&self, expected_name: &str) -> Result<(), Report<Error>> {
-        validate_envelope(self, expected_name)?;
-        self.payload.validate_payload()
+/// The payload half, held as a plain function so [`Envelope::validate`] can run
+/// it without a [`ValidatePayload`] bound of its own — the bound sits on
+/// [`Expect::check_payload`], the only place that can install one.
+type PayloadCheck<P> = fn(&Envelope<P>) -> Result<(), Report<Error>>;
+
+/// What a consumer expects of an artifact. Each check is chosen by the consumer
+/// that can make it: a claim it cannot know is left unset, a check it cannot
+/// perform is left off.
+pub struct Expect<'a, P> {
+    name: &'a str,
+    node: Option<&'a str>,
+    plane: Option<PlaneTag>,
+    payload: Option<PayloadCheck<P>>,
+    envelope_schema_version: bool,
+}
+
+impl<'a, P> Expect<'a, P> {
+    /// The name the artifact was addressed by — every consumer has one, since
+    /// `name` is the whole of dispatch, and checking it is defence-in-depth
+    /// against being handed an artifact it did not ask for.
+    pub fn new(name: &'a str) -> Self {
+        Self {
+            name,
+            node: None,
+            plane: None,
+            payload: None,
+            envelope_schema_version: true,
+        }
+    }
+
+    /// The node this artifact must be projected for. Stated only by a consumer
+    /// that knows the node independently of the artifact — the compiler's
+    /// self-check, and the agent's own node; one that is handed its config and
+    /// has no independent notion of its node leaves it unset.
+    pub fn check_node(mut self, node: &'a str) -> Self {
+        self.node = Some(node);
+        self
+    }
+
+    /// The plane this artifact must be on, for a consumer whose `P` cannot say.
+    /// [`check_payload`](Expect::check_payload) pins the plane from the payload
+    /// type itself, so a consumer that opts into that need not state one here.
+    pub fn check_plane(mut self, plane: PlaneTag) -> Self {
+        self.plane = Some(plane);
+        self
+    }
+
+    /// Also check everything the payload type claims: that this artifact is on
+    /// the plane its family lives on, that family's own version ladder, and the
+    /// payload's rules ([`ValidatePayload`]).
+    ///
+    /// The bound is what makes this half opt-in rather than skippable — a
+    /// consumer that cannot parse the payload has no `P` that satisfies it.
+    pub fn check_payload(mut self) -> Self
+    where
+        P: ValidatePayload,
+    {
+        self.payload = Some(validate_payload_claims::<P>);
+        self
+    }
+
+    /// Accept an envelope schema version this build does not speak.
+    pub fn skip_envelope_schema_version(mut self) -> Self {
+        self.envelope_schema_version = false;
+        self
+    }
+}
+
+/// The payload type's own claims, installed by [`Expect::check_payload`].
+fn validate_payload_claims<P: ValidatePayload>(env: &Envelope<P>) -> Result<(), Report<Error>> {
+    // The `(plane, family)` cell a payload lives in is the payload type's to
+    // state, never the caller's: no consumer may widen it by expecting another.
+    if env.plane.tag() != P::PLANE {
+        bail!(Error::new(format!(
+            "Artifact is on the {:?} plane, but its payload family lives on the {:?} plane",
+            env.plane.tag(),
+            P::PLANE
+        )));
+    }
+    // The payload family's ladder, independent of the envelope's — gated here
+    // rather than in each `validate_payload`, so no payload can skip it.
+    version::ensure_supported(&P::FAMILY, env.payload.schema_version())?;
+    env.payload.validate_payload()
+}
+
+impl<P> Envelope<P> {
+    /// Validate this artifact against what its consumer [expects](Expect).
+    pub fn validate(&self, expect: Expect<'_, P>) -> Result<(), Report<Error>> {
+        if expect.envelope_schema_version {
+            version::ensure_supported(&version::ENVELOPE, &self.schema_version)?;
+        }
+        if let Some(plane) = expect.plane
+            && self.plane.tag() != plane
+        {
+            bail!(Error::new(format!(
+                "Artifact is on the {:?} plane, expected {:?}",
+                self.plane.tag(),
+                plane
+            )));
+        }
+        // `name` is addressing: it says which artifact this is. It claims
+        // nothing about the payload's schema, and no consumer may infer one from
+        // it — a workload otherwise uses its name for logging.
+        if self.name != expect.name {
+            bail!(Error::new(format!(
+                "Artifact names {:?}, expected {:?}",
+                self.name, expect.name
+            )));
+        }
+        if let Some(node) = expect.node
+            && self.node != node
+        {
+            bail!(Error::new(format!(
+                "Artifact is projected for node {:?}, expected {:?}",
+                self.node, node
+            )));
+        }
+        match expect.payload {
+            Some(check) => check(self),
+            None => Ok(()),
+        }
     }
 }
 
@@ -53,37 +181,6 @@ impl ValidatePayload for VertexMgmtPayload {
             VertexKind::Mesh => Ok(()),
         }
     }
-}
-
-/// Envelope-level checks, generic over any [`Payload`]: both supported schema
-/// versions, the plane the payload declares, and the expected name.
-fn validate_envelope<P: Payload>(
-    env: &Envelope<P>,
-    expected_name: &str,
-) -> Result<(), Report<Error>> {
-    // Fail-closed major.minor gate (see `version`): accept older-or-equal minors
-    // within the known major, reject a different major or a newer minor. The
-    // envelope and the payload family version independently, so both are gated
-    // — here rather than in each `validate_payload`, so no payload can skip it.
-    version::ensure_supported(&version::ENVELOPE, &env.schema_version)?;
-    version::ensure_supported(&P::FAMILY, env.payload.schema_version())?;
-    if env.plane.tag() != P::PLANE {
-        bail!(Error::new(format!(
-            "Artifact is on the {:?} plane, expected {:?}",
-            env.plane.tag(),
-            P::PLANE
-        )));
-    }
-    // Name is the whole of dispatch: the caller states which artifact it came
-    // for, and `P` is the schema it decided that name implies. Nothing else in
-    // the envelope claims what kind of artifact this is.
-    if env.name != expected_name {
-        bail!(Error::new(format!(
-            "Artifact names {:?}, expected {:?}",
-            env.name, expected_name
-        )));
-    }
-    Ok(())
 }
 
 /// Checks shared by every vertex engine: all SPIFFE IDs share one trust domain,
@@ -255,7 +352,7 @@ mod tests {
     #[test]
     fn valid_link_envelope_passes() {
         parse(envelope_with(valid_payload()))
-            .validate("flor")
+            .validate(Expect::new("flor").check_payload())
             .unwrap();
     }
 
@@ -265,10 +362,35 @@ mod tests {
     fn rejects_wrong_envelope_schema_version() {
         let mut v = envelope_with(valid_payload());
         v["schema_version"] = json!("0.9");
-        let err = parse(v).validate("flor").unwrap_err();
+        let err = parse(v)
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("schema_version"), "{msg}");
         assert!(msg.contains("envelope"), "{msg}");
+    }
+
+    #[test]
+    fn a_relay_moves_an_envelope_schema_version_it_does_not_speak() {
+        // Relays never gate (ADR-0012): the routing core is frozen across every
+        // envelope version, so a consumer reading only that still checks its
+        // claims on an artifact this build could not otherwise interpret.
+        let mut v = envelope_with(valid_payload());
+        v["schema_version"] = json!("9.0");
+        let env: Envelope<Value> = serde_json::from_value(v).expect("envelope json deserializes");
+        env.validate(
+            Expect::new("flor")
+                .check_plane(PlaneTag::Mgmt)
+                .check_node("alpha")
+                .skip_envelope_schema_version(),
+        )
+        .unwrap();
+
+        // Waiving the ladder waives nothing else.
+        assert!(
+            env.validate(Expect::new("other").skip_envelope_schema_version())
+                .is_err()
+        );
     }
 
     #[test]
@@ -277,7 +399,9 @@ mod tests {
         // does not vouch for the payload's minor.
         let mut p = valid_payload();
         p["schema_version"] = json!("1.9");
-        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        let err = parse(envelope_with(p))
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("vertex payload"), "{msg}");
         assert!(msg.contains("upgrade"), "{msg}");
@@ -290,13 +414,17 @@ mod tests {
         let mut v = envelope_with(valid_payload());
         v["schema_version"] = json!("2.0");
         v["payload"]["schema_version"] = json!("1.0");
-        let err = parse(v).validate("flor").unwrap_err();
+        let err = parse(v)
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         assert!(format!("{err:?}").contains("envelope"), "{err:?}");
 
         let mut v = envelope_with(valid_payload());
         v["schema_version"] = json!("1.0");
         v["payload"]["schema_version"] = json!("2.0");
-        let err = parse(v).validate("flor").unwrap_err();
+        let err = parse(v)
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         assert!(format!("{err:?}").contains("vertex payload"), "{err:?}");
     }
 
@@ -304,7 +432,9 @@ mod tests {
     fn rejects_non_mgmt_plane() {
         let mut v = envelope_with(valid_payload());
         v["plane"] = json!({ "ctrl": { "obeys_mgmt_version": 1 } });
-        let err = parse(v).validate("flor").unwrap_err();
+        let err = parse(v)
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         assert!(
             format!("{err:?}").to_lowercase().contains("mgmt"),
             "{err:?}"
@@ -314,9 +444,97 @@ mod tests {
     #[test]
     fn rejects_name_mismatch() {
         let err = parse(envelope_with(valid_payload()))
-            .validate("other")
+            .validate(Expect::new("other").check_payload())
             .unwrap_err();
         assert!(format!("{err:?}").contains("flor"), "{err:?}");
+    }
+
+    // --- the payload-agnostic half, as the agent uses it ---
+
+    #[test]
+    fn claims_validate_over_an_unparsed_payload() {
+        // The supervisor's case: it knows the envelope and nothing else. A
+        // payload it cannot parse — here, one that is not even a vertex payload
+        // — must not stop it from checking every claim the frozen core makes.
+        let mut v = envelope_with(valid_payload());
+        v["payload"] = json!({ "some-future-workload": { "we": "cannot parse this" } });
+        let env: Envelope<Value> = serde_json::from_value(v).expect("envelope json deserializes");
+        env.validate(
+            Expect::new("flor")
+                .check_plane(PlaneTag::Mgmt)
+                .check_node("alpha"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_node_mismatch() {
+        // A caller that knows its node rejects an artifact projected for
+        // another one; the same artifact passes when the caller doesn't know.
+        let env = parse(envelope_with(valid_payload()));
+        let err = env
+            .validate(
+                Expect::new("flor")
+                    .check_plane(PlaneTag::Mgmt)
+                    .check_node("beta"),
+            )
+            .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("alpha") && msg.contains("beta"), "{msg}");
+
+        env.validate(Expect::new("flor").check_plane(PlaneTag::Mgmt))
+            .unwrap();
+    }
+
+    #[test]
+    fn the_plane_is_checked_only_against_a_caller_that_stated_one() {
+        // A consumer whose `P` says nothing, and which does not state a plane
+        // either, is asking for the remaining claims alone.
+        let mut v = envelope_with(valid_payload());
+        v["plane"] = json!({ "ctrl": { "obeys_mgmt_version": 1 } });
+        let env: Envelope<Value> = serde_json::from_value(v).expect("envelope json deserializes");
+        env.validate(Expect::new("flor")).unwrap();
+        assert!(
+            env.validate(Expect::new("flor").check_plane(PlaneTag::Mgmt))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_payload_check_pins_the_plane_its_family_lives_on() {
+        // The `(plane, family)` cell is the payload type's to state: a consumer
+        // that opts into the payload check cannot widen it by expecting the
+        // ctrl plane, even though the artifact agrees with it.
+        let mut v = envelope_with(valid_payload());
+        v["plane"] = json!({ "ctrl": { "obeys_mgmt_version": 1 } });
+        let err = parse(v)
+            .validate(
+                Expect::new("flor")
+                    .check_plane(PlaneTag::Ctrl)
+                    .check_payload(),
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").to_lowercase().contains("mgmt"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn claims_ignore_the_payload_family_ladder() {
+        // The payload's own version is not the agent's to gate: an artifact
+        // stamped at an unsupported payload minor still passes the claims
+        // check, and is rejected only by the consumer that parses it.
+        let mut p = valid_payload();
+        p["schema_version"] = json!("1.9");
+        let env = parse(envelope_with(p));
+        env.validate(
+            Expect::new("flor")
+                .check_plane(PlaneTag::Mgmt)
+                .check_node("alpha"),
+        )
+        .unwrap();
+        assert!(env.validate(Expect::new("flor").check_payload()).is_err());
     }
 
     // --- common vertex rules (apply to link and mesh alike) ---
@@ -325,7 +543,9 @@ mod tests {
     fn rejects_workload_without_io() {
         let mut p = valid_payload();
         p["workloads"][0]["io"] = json!([]);
-        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        let err = parse(envelope_with(p))
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         assert!(format!("{err:?}").contains("io channels"), "{err:?}");
     }
 
@@ -333,7 +553,9 @@ mod tests {
     fn rejects_undeclared_via_adapter() {
         let mut p = valid_payload();
         p["links"][0]["members"][0]["via"]["adapter"] = json!("nope");
-        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        let err = parse(envelope_with(p))
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         assert!(format!("{err:?}").contains("adapter"), "{err:?}");
     }
 
@@ -342,7 +564,9 @@ mod tests {
         // `florio` via referencing the declared udp adapter `wire`.
         let mut p = valid_payload();
         p["links"][0]["members"][0]["via"] = json!({ "type": "florio", "adapter": "wire" });
-        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        let err = parse(envelope_with(p))
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         assert!(format!("{err:?}").contains("does not match"), "{err:?}");
     }
 
@@ -351,7 +575,9 @@ mod tests {
         // A user is not a dialable kind (only service/vertex are).
         let mut p = valid_payload();
         p["links"][0]["members"][0]["peer"] = json!("spiffe://demo.flor/user/alice");
-        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        let err = parse(envelope_with(p))
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         assert!(format!("{err:?}").contains("dialable"), "{err:?}");
     }
 
@@ -366,7 +592,9 @@ mod tests {
             { "name": "wire",  "type": "udp", "listen": "0.0.0.0:4433" },
             { "name": "wire2", "type": "udp", "listen": "0.0.0.0:4434" }
         ]);
-        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        let err = parse(envelope_with(p))
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         assert!(format!("{err:?}").contains("exactly one udp"), "{err:?}");
     }
 
@@ -376,10 +604,12 @@ mod tests {
         // terminates it. Its link must dial over a udp adapter.
         let mut p = valid_payload();
         p["connection_manager"]["adapters"] = json!([
-            { "name": "io", "type": "florio", "socket": "/run/flor.sock" }
+            { "name": "io", "type": "florio", "vertex": "public" }
         ]);
         p["links"][0]["members"][0]["via"] = json!({ "type": "florio", "adapter": "io" });
-        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        let err = parse(envelope_with(p))
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         assert!(format!("{err:?}").contains("exactly one udp"), "{err:?}");
     }
 
@@ -390,7 +620,9 @@ mod tests {
         p["connection_manager"]["adapters"] = json!([]);
         p["links"] = json!([]);
         p["egress"] = json!([]);
-        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        let err = parse(envelope_with(p))
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         assert!(format!("{err:?}").contains("exactly one udp"), "{err:?}");
     }
 
@@ -398,7 +630,9 @@ mod tests {
     fn rejects_egress_target_without_link() {
         let mut p = valid_payload();
         p["egress"][0]["target"] = json!("spiffe://demo.flor/service/unlinked");
-        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        let err = parse(envelope_with(p))
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         assert!(format!("{err:?}").contains("Egress target"), "{err:?}");
     }
 
@@ -408,7 +642,9 @@ mod tests {
         let mut p = valid_payload();
         p["links"][0]["members"][0]["peer"] = json!("spiffe://other.flor/service/mongodb");
         p["egress"][0]["target"] = json!("spiffe://other.flor/service/mongodb");
-        let err = parse(envelope_with(p)).validate("flor").unwrap_err();
+        let err = parse(envelope_with(p))
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         assert!(format!("{err:?}").contains("trust domain"), "{err:?}");
     }
 
@@ -428,7 +664,9 @@ mod tests {
                 ] }
             ]
         });
-        parse(envelope_with(mesh)).validate("flor").unwrap();
+        parse(envelope_with(mesh))
+            .validate(Expect::new("flor").check_payload())
+            .unwrap();
     }
 
     #[test]
@@ -446,7 +684,9 @@ mod tests {
                 ] }
             ]
         });
-        let err = parse(envelope_with(mesh)).validate("flor").unwrap_err();
+        let err = parse(envelope_with(mesh))
+            .validate(Expect::new("flor").check_payload())
+            .unwrap_err();
         assert!(format!("{err:?}").contains("does not match"), "{err:?}");
     }
 
@@ -464,6 +704,8 @@ mod tests {
                 { "target": "spiffe://demo.flor/service/far-away", "allow": ["spiffe://demo.flor/user/alice"] }
             ]
         });
-        parse(envelope_with(mesh)).validate("flor").unwrap();
+        parse(envelope_with(mesh))
+            .validate(Expect::new("flor").check_payload())
+            .unwrap();
     }
 }

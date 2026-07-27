@@ -33,7 +33,7 @@ use std::path::PathBuf;
 
 use error_stack::{Report, ResultExt};
 
-use super::artifact::{Envelope, VertexMgmtPayload};
+use super::artifact::{Envelope, Expect, VertexMgmtPayload};
 use super::rete::RepoModel;
 
 pub use plan::Plan;
@@ -88,9 +88,15 @@ pub fn compile(
     let mut artifacts = Vec::new();
     for (node, node_plan) in &plan.nodes {
         let artifact = vertex::project(&plan, node, node_plan, opts)?;
+        // The compiler knows the `node` it projected for, so it expects that
+        // too: an artifact stamped for the wrong node must never leave here.
         artifact
             .envelope
-            .validate(&artifact.vertex_name)
+            .validate(
+                Expect::new(&artifact.vertex_name)
+                    .check_node(&artifact.node)
+                    .check_payload(),
+            )
             .change_context_lazy(|| {
                 Error::new(format!("Compiled artifact for node '{node}' is malformed"))
             })?;
@@ -343,7 +349,7 @@ users:
         assert_eq!(env.payload.schema_version, version::VERTEX.stamp());
         // Whatever it stamped, the artifact passes its own gate — `compile`
         // already validates every artifact, so this pins the round trip.
-        env.validate("public").unwrap();
+        env.validate(Expect::new("public").check_payload()).unwrap();
     }
 
     /// The user-node payload from validate-and-compile.mdx: an initiator-only
