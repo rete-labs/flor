@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use flor::config::artifact::{Envelope, VertexMgmtPayload};
+use flor::config::artifact::{Envelope, Expect, VertexMgmtPayload};
 
 const RETE: &str = r#"
 rete:
@@ -85,7 +85,7 @@ fn load_artifact(path: &Path, expected_name: &str) -> Envelope<VertexMgmtPayload
     let json = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let env: Envelope<VertexMgmtPayload> =
         serde_json::from_slice(&json).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
-    env.validate(expected_name)
+    env.validate(Expect::new(expected_name).check_payload())
         .unwrap_or_else(|e| panic!("validate {}: {e:?}", path.display()));
     env
 }
