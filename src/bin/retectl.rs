@@ -138,7 +138,7 @@ fn main() {
     let cli = Cli::parse();
 
     if DEBUG {
-        let _ = flor::logging::logger::init(log::LevelFilter::Info);
+        let _ = flor::logging::logger::init(flor::logging::logger::LevelFilter::INFO);
     }
 
     if let Err(e) = run(cli.cmd) {

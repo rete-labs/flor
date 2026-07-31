@@ -105,7 +105,8 @@ fn main() {
         Cmd::Vertex {
             action: VertexAction::Run(vertex_args),
         } => {
-            logging::logger::init(log::LevelFilter::Info).expect("Failed to initialize logger");
+            logging::logger::init(logging::logger::LevelFilter::INFO)
+                .expect("Failed to initialize logger");
             if let Err(e) = run_vertex(vertex_args) {
                 print_error(&e, verbose);
                 std::process::exit(1);

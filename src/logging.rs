@@ -13,9 +13,9 @@ pub struct Error(String);
 fn init_global_test_logging() {
     logger::init_with_config(
         &logger::Config::new()
-            .global_log_filter(log::LevelFilter::Off)
+            .global_log_filter(logger::LevelFilter::OFF)
             // Explicitly disable spammy logs of serial_test crate
-            .module_log_filter("serial_test".into(), log::LevelFilter::Off),
+            .module_log_filter("serial_test".into(), logger::LevelFilter::OFF),
     )
     .expect("Failed to initialize logger");
 }

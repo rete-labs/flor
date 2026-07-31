@@ -1,14 +1,38 @@
 // Copyright (C) 2026 ReteLabs LLC.
 // Licensed under Apache-2.0 or MIT at your option.
 
-use std::{borrow::Cow, io::Write};
+//! The process-wide logger: a `tracing` subscriber rendering one line per event.
+//!
+//! Events reach it from both facades — `tracing::` macros and, through
+//! `LogTracer`, the `log::` macros used by flor and its dependencies — so a
+//! single filter and format govern everything. Enclosing spans are rendered
+//! before the message, which is how an event emitted deep inside a connection
+//! handler carries that connection's identity without being passed it.
+//!
+//! Call [`init`] or [`init_with_config`] once per process, before anything logs.
+//! `RUST_LOG` overrides the [`Config`] filters and accepts the usual
+//! `target=level` syntax.
 
+use std::borrow::Cow;
+use std::fmt;
+use std::io::IsTerminal;
+
+use anstyle::{AnsiColor, Effects, Style};
 use chrono::Local;
-use env_logger::fmt::style::{self, Style};
 use error_stack::{Report, ResultExt};
-use log::LevelFilter;
+use tracing::{Event, Subscriber};
+use tracing_log::NormalizeEvent;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, FormattedFields};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::logging::Error;
+
+/// Severity threshold for the logger, re-exported so call sites depend on this
+/// module's vocabulary rather than on whichever facade backs it.
+pub use tracing::level_filters::LevelFilter;
 
 const SHORTENED_TARGET_MAX_LEN: usize = 20;
 
@@ -81,7 +105,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            global_log_filter: LevelFilter::Info,
+            global_log_filter: LevelFilter::INFO,
             modules_log_filter: vec![],
             include_time: true,
             include_date: false,
@@ -99,11 +123,10 @@ impl Default for Config {
 ///
 /// ### Examples
 /// ```
-/// use log::LevelFilter;
-/// use flor::logging::logger;
+/// use flor::logging::logger::{self, LevelFilter};
 ///
-/// logger::init(LevelFilter::Info).unwrap();
-/// log::info!("Logger is initialized!");
+/// logger::init(LevelFilter::INFO).unwrap();
+/// tracing::info!("Logger is initialized!");
 /// ```
 pub fn init(log_level: LevelFilter) -> Result<(), Report<Error>> {
     init_with_config(&Config::new().global_log_filter(log_level))
@@ -122,87 +145,204 @@ pub fn init(log_level: LevelFilter) -> Result<(), Report<Error>> {
 ///
 /// ### Examples
 /// ```
-/// use log::LevelFilter;
-/// use flor::logging::logger;
+/// use flor::logging::logger::{self, LevelFilter};
 ///
 /// logger::init_with_config(
 ///     &logger::Config::new()
-///         .global_log_filter(LevelFilter::Debug)
-///         .module_log_filter("my_crate".into(), LevelFilter::Info)
+///         .global_log_filter(LevelFilter::DEBUG)
+///         .module_log_filter("my_crate".into(), LevelFilter::INFO)
 ///         .include_shortened_target(false)
 ///         .include_time(false)
 /// );
-/// log::info!("Logger is initialized with custom config!");
+/// tracing::info!("Logger is initialized with custom config!");
 /// ```
 pub fn init_with_config(config: &Config) -> Result<(), Report<Error>> {
-    let mut env_builder = env_logger::Builder::new();
+    let format = FlorFormat {
+        include_time: config.include_time,
+        include_date: config.include_date,
+        include_shortened_target: config.include_shortened_target,
+    };
 
-    env_builder.filter_level(config.global_log_filter);
+    // Never colorize a non-terminal sink.
+    let ansi = std::io::stderr().is_terminal();
 
-    config
-        .modules_log_filter
-        .iter()
-        .for_each(|(module, level)| {
-            env_builder.filter_module(module, *level);
-        });
-
-    let include_time = config.include_time;
-    let include_date = config.include_date;
-    let include_shortened_target = config.include_shortened_target;
-    env_builder.format(move |buf, record| {
-        let comp_style = style::AnsiColor::BrightBlack.on_default();
-        if include_time || include_date {
-            write_timestamp(buf, &comp_style, include_time, include_date)?;
-        }
-
-        let level_style = buf.default_level_style(record.level());
-        write!(buf, "{level_style}{:>5}{level_style:#} ", record.level())?;
-
-        if include_shortened_target {
-            write_target(buf, &comp_style, record.target())?;
-        }
-
-        writeln!(buf, "{}", record.args())
+    // `tracing-subscriber` rewrites escape sequences found *inside* a message, as
+    // a terminal-injection defense — our messages carry peer-controlled text
+    // (hostnames, SPIFFE IDs, remote error strings), so a release build always
+    // keeps it. The cost is that a styled `Report` arrives mangled rather than
+    // colored, since its escapes travel inside the message.
+    //
+    // Debug builds trade that away: a developer reading an error stack in a
+    // terminal benefits from the color, and the peers involved are their own. The
+    // relaxation is scoped as narrowly as it can be — debug build *and* a terminal
+    // sink — so a redirected dev log is still sanitized.
+    // Release's log is always sanitized.
+    let styled_reports = ansi && cfg!(debug_assertions);
+    Report::set_color_mode(if styled_reports {
+        error_stack::fmt::ColorMode::Color
+    } else {
+        error_stack::fmt::ColorMode::None
     });
 
-    env_builder.parse_default_env();
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_ansi(ansi)
+        .with_ansi_sanitization(!styled_reports)
+        .event_format(format);
 
-    env_builder
+    tracing_subscriber::registry()
+        .with(build_filter(config)?)
+        .with(fmt_layer)
         .try_init()
         .change_context(Error("Failed to set logger".into()))
 }
 
-fn write_timestamp(
-    w: &mut dyn Write,
-    style: &Style,
+/// Maps the `Config` filters onto an `EnvFilter`, with `RUST_LOG` taking precedence.
+///
+/// The two sources are parsed with deliberately different strictness. `RUST_LOG`
+/// is operator input typed at runtime, so an unusable directive is dropped with a
+/// warning on stderr (`ignoring \`x=debgu\`: …`) and the rest still applies.
+/// This behaviour is justified because we cannot ensure that `RUST_LOG` is fully
+/// correct: a typo in a component name cannot be detected.
+///
+/// On the other hand, `Config` directives are programmer input, so a malformed one
+/// is a bug and fails initialization instead of being skipped.
+fn build_filter(config: &Config) -> Result<tracing_subscriber::EnvFilter, Report<Error>> {
+    if let Ok(env) = std::env::var("RUST_LOG")
+        && !env.is_empty()
+    {
+        return Ok(tracing_subscriber::EnvFilter::new(env));
+    }
+
+    let mut directives = vec![config.global_log_filter.to_string()];
+    for (module, level) in &config.modules_log_filter {
+        directives.push(format!("{module}={level}"));
+    }
+    let directives = directives.join(",");
+    tracing_subscriber::EnvFilter::try_new(&directives)
+        .change_context_lazy(|| Error(format!("Invalid log filter directives: '{directives}'")))
+}
+
+/// Renders one event as `<time> <LEVEL> <component>: <spans> <message+fields>`.
+struct FlorFormat {
     include_time: bool,
     include_date: bool,
-) -> std::io::Result<()> {
-    if include_time || include_date {
-        let time = Local::now();
-        if include_date {
-            write!(w, "{style}{}{style:#} ", time.format("%Y-%m-%d"))?;
+    include_shortened_target: bool,
+}
+
+impl<S, N> FormatEvent<S, N> for FlorFormat
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let greyed_style = AnsiColor::BrightBlack.on_default();
+        let ansi = writer.has_ansi_escapes();
+
+        if self.include_time || self.include_date {
+            write_timestamp(
+                &mut writer,
+                &greyed_style,
+                ansi,
+                self.include_time,
+                self.include_date,
+            )?;
         }
-        if include_time {
-            write!(w, "{style}{}{style:#} ", time.format("%H:%M:%S%.3f"))?;
+
+        // Records arriving through the `log` bridge carry their real target and
+        // level in `log.*` fields; normalizing recovers them.
+        let normalized = event.normalized_metadata();
+        let meta = normalized.as_ref().unwrap_or_else(|| event.metadata());
+
+        let level_style = level_style(meta.level());
+        write_styled(
+            &mut writer,
+            &level_style,
+            ansi,
+            &format!("{:>5}", meta.level().as_str()),
+        )?;
+        write!(writer, " ")?;
+
+        if self.include_shortened_target {
+            write_target(&mut writer, &greyed_style, ansi, meta.target())?;
         }
+
+        // Every enclosing span, root-first, with its fields. Deliberately not
+        // wrapped in a style of our own: the field renderer already styles names
+        // and separators, and its escapes end with a full reset, which would cut
+        // any enclosing style off partway through anyway.
+        if let Some(scope) = ctx.event_scope() {
+            for span in scope.from_root() {
+                let ext = span.extensions();
+                match ext.get::<FormattedFields<N>>() {
+                    Some(fields) if !fields.is_empty() => {
+                        write!(writer, "{}{{{}}} ", span.name(), fields.fields.as_str())?
+                    }
+                    _ => write!(writer, "{} ", span.name())?,
+                }
+            }
+        }
+
+        ctx.format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
+
+fn write_styled(w: &mut Writer<'_>, style: &Style, ansi: bool, text: &str) -> fmt::Result {
+    if ansi {
+        write!(w, "{style}{text}{style:#}")
+    } else {
+        write!(w, "{text}")
+    }
+}
+
+fn level_style(level: &tracing::Level) -> Style {
+    match *level {
+        tracing::Level::ERROR => AnsiColor::Red.on_default().effects(Effects::BOLD),
+        tracing::Level::WARN => AnsiColor::Yellow.on_default(),
+        tracing::Level::INFO => AnsiColor::Green.on_default(),
+        tracing::Level::DEBUG => AnsiColor::Blue.on_default(),
+        tracing::Level::TRACE => AnsiColor::Cyan.on_default(),
+    }
+}
+
+fn write_timestamp(
+    w: &mut Writer<'_>,
+    style: &Style,
+    ansi: bool,
+    include_time: bool,
+    include_date: bool,
+) -> fmt::Result {
+    let time = Local::now();
+    if include_date {
+        write_styled(w, style, ansi, &format!("{} ", time.format("%Y-%m-%d")))?;
+    }
+    if include_time {
+        write_styled(w, style, ansi, &format!("{} ", time.format("%H:%M:%S%.3f")))?;
     }
     Ok(())
 }
 
-fn write_target(w: &mut dyn Write, style: &Style, target: &str) -> std::io::Result<()> {
-    let shortened_target = target.split_once("::").map_or(target, |(first, _)| first);
+fn write_target(w: &mut Writer<'_>, style: &Style, ansi: bool, target: &str) -> fmt::Result {
+    write_styled(w, style, ansi, &format!("{}: ", shorten_target(target)))
+}
 
-    let mut chars = shortened_target.char_indices();
-    let cut = chars.nth(SHORTENED_TARGET_MAX_LEN).map(|(i, _)| i);
+/// Reduces a log target to its first path segment, capped in length.
+///
+/// `my_crate::module::submodule` becomes `my_crate`; a custom target is taken
+/// as-is up to the cap.
+fn shorten_target(target: &str) -> &str {
+    let shortened = target.split_once("::").map_or(target, |(first, _)| first);
 
-    match cut {
-        Some(idx) => {
-            write!(w, "{style}{}:{style:#} ", &shortened_target[..idx])
-        }
-        None => {
-            write!(w, "{style}{shortened_target}:{style:#} ")
-        }
+    let mut chars = shortened.char_indices();
+    match chars.nth(SHORTENED_TARGET_MAX_LEN).map(|(i, _)| i) {
+        Some(idx) => &shortened[..idx],
+        None => shortened,
     }
 }
 
@@ -210,41 +350,28 @@ fn write_target(w: &mut dyn Write, style: &Style, target: &str) -> std::io::Resu
 mod tests {
     use super::*;
 
-    fn default_style() -> Style {
-        Style::new()
-    }
-
     #[test]
     fn write_custom_target_less_than_limit() {
-        let mut buf = Vec::new();
-        let style = default_style();
-        write_target(&mut buf, &style, "my_crate").unwrap();
-        assert_eq!(String::from_utf8(buf).unwrap(), "my_crate: ");
+        assert_eq!(shorten_target("my_crate"), "my_crate");
     }
 
     #[test]
     fn write_custom_target_more_than_limit() {
-        let mut buf = Vec::new();
-        let style = default_style();
         let long_target = "my_very_long_crate_name_module_submodule";
-        write_target(&mut buf, &style, long_target).unwrap();
-        assert_eq!(String::from_utf8(buf).unwrap(), "my_very_long_crate_n: ");
+        assert_eq!(shorten_target(long_target), "my_very_long_crate_n");
     }
 
     #[test]
     fn write_module_target_less_than_limit() {
-        let mut buf = Vec::new();
-        let style = default_style();
-        write_target(&mut buf, &style, "my_limited_crate1234::module").unwrap();
-        assert_eq!(String::from_utf8(buf).unwrap(), "my_limited_crate1234: ");
+        assert_eq!(
+            shorten_target("my_limited_crate1234::module"),
+            "my_limited_crate1234"
+        );
     }
 
     #[test]
     fn write_module_target_more_than_limit() {
-        let mut buf = Vec::new();
-        let style = default_style();
         let long_target = "my_very_long_crate_name_module_submodule::submodule";
-        write_target(&mut buf, &style, long_target).unwrap();
-        assert_eq!(String::from_utf8(buf).unwrap(), "my_very_long_crate_n: ");
+        assert_eq!(shorten_target(long_target), "my_very_long_crate_n");
     }
 }
