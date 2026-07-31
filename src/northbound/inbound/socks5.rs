@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
+use tracing::Instrument;
 
 use crate::core::identity::{Dialable, X509Svid};
 use crate::core::transport::QuicConnector;
@@ -159,28 +160,34 @@ async fn bind_listeners(
 }
 
 async fn run_listener(caller: Arc<X509Svid>, listener: TcpListener, backend: Arc<dyn QuicBackend>) {
-    let principal = caller.spiffe_id().clone();
+    let initiator = caller.spiffe_id().clone();
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
             result = listener.accept() => match result {
                 Ok((stream, peer_addr)) => {
-                    log::debug!(target: LOG_TARGET,
-                        "Accepted connection from {peer_addr} for principal '{principal}'");
+                    let span = tracing::error_span!(
+                        target: LOG_TARGET,
+                        "conn",
+                        initiator = %initiator,
+                        client_sock_addr = %peer_addr,
+                        target = tracing::field::Empty,
+                    );
                     let backend = backend.clone();
                     let caller = caller.clone();
-                    let principal = principal.clone();
-                    tasks.spawn(async move {
-                        if let Err(e) = handle_socks5(stream, backend, caller).await {
-                            log::warn!(target: LOG_TARGET,
-                                "Connection from {peer_addr} via SOCKS5 for principal \
-                                 '{principal}' error: {e:?}");
+                    tasks.spawn(
+                        async move {
+                            log::debug!(target: LOG_TARGET, "Accepted connection");
+                            if let Err(e) = handle_socks5(stream, backend, caller).await {
+                                log::warn!(target: LOG_TARGET, "SOCKS5 connection error: {e:?}");
+                            }
                         }
-                    });
+                        .instrument(span),
+                    );
                 }
                 Err(e) => {
                     log::error!(target: LOG_TARGET,
-                        "SOCKS5 listener for '{principal}' accept error: {e:?}");
+                        "SOCKS5 listener for '{initiator}' accept error: {e:?}");
                     break;
                 }
             },
@@ -231,12 +238,14 @@ async fn handle_socks5(
         }
     };
 
+    tracing::Span::current().record("target", tracing::field::display(&host));
+
     // Step 4: Resolve the hostname to a dial target against the caller's trust
     // domain (inbound builds services only; see ADR-0007).
     let target = match Dialable::resolve(&host, caller.spiffe_id().trust_domain()) {
         Ok(target) => target,
         Err(e) => {
-            log::debug!(target: LOG_TARGET, "Cannot resolve target '{host}': {e:?}");
+            tracing::debug!(target: LOG_TARGET, "Target unresolvable: {e}");
             proto
                 .reply_error(&ReplyError::HostUnreachable)
                 .change_context(Error("Failed to reply to unresolvable target".into()))

@@ -10,7 +10,6 @@ version = "0.1.0"
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
-env_logger = "0.11"
 error-stack = "0.7"
 fast-socks5 = "1.0"
 fundle = "0.3"
@@ -25,12 +24,16 @@ thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 
 # Using "ring" backend across all crypto libs, as quinn uses it by default
+anstyle = "1.0"
+pem = "3"
 quinn = { version = "0.11" }
-rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser"] }
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring", "x509-parser"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 spiffe = { version = "0.15", default-features = false, features = ["x509"] }
-pem = "3"
 time = { version = "0.3", default-features = false, features = ["std"] }
+tracing = "0.1"
+tracing-log = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 x509-parser = { version = "0.18", features = ["verify"] }
 
 [dev-dependencies]
