@@ -11,7 +11,9 @@
 //!
 //! Call [`init`] or [`init_with_config`] once per process, before anything logs.
 //! `RUST_LOG` overrides the [`Config`] filters and accepts the usual
-//! `target=level` syntax.
+//! `target=level` syntax. `FLOR_LOG_UNSANITIZED=1` lets escape sequences carried
+//! inside a message reach the terminal — colored error stacks at the cost of the
+//! terminal-injection defense; it is ignored unless stderr is a terminal.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -168,17 +170,18 @@ pub fn init_with_config(config: &Config) -> Result<(), Report<Error>> {
 
     // `tracing-subscriber` rewrites escape sequences found *inside* a message, as
     // a terminal-injection defense — our messages carry peer-controlled text
-    // (hostnames, SPIFFE IDs, remote error strings), so a release build always
-    // keeps it. The cost is that a styled `Report` arrives mangled rather than
-    // colored, since its escapes travel inside the message.
+    // (hostnames, SPIFFE IDs, remote error strings). The cost is that a styled
+    // `Report` arrives mangled rather than colored, since its escapes travel
+    // inside the message.
     //
-    // Debug builds trade that away: a developer reading an error stack in a
-    // terminal benefits from the color, and the peers involved are their own. The
-    // relaxation is scoped as narrowly as it can be — debug build *and* a terminal
-    // sink — so a redirected dev log is still sanitized.
-    // Release's log is always sanitized.
-    let styled_reports = ansi && cfg!(debug_assertions);
-    Report::set_color_mode(if styled_reports {
+    // `FLOR_LOG_UNSANITIZED` trades that away for a developer running a reproducer
+    // in a controlled environment, where the peers involved are their own. It is a
+    // runtime choice rather than a build one, because the binary under debugging is
+    // often release-optimized. It is honored only on a terminal — the one sink with
+    // no storage behind it, so no durable log is poisoned — and announced below, so
+    // a relaxed process says so rather than being inferred.
+    let unsanitized = ansi && env_flag("FLOR_LOG_UNSANITIZED");
+    Report::set_color_mode(if unsanitized {
         error_stack::fmt::ColorMode::Color
     } else {
         error_stack::fmt::ColorMode::None
@@ -187,14 +190,27 @@ pub fn init_with_config(config: &Config) -> Result<(), Report<Error>> {
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_ansi(ansi)
-        .with_ansi_sanitization(!styled_reports)
+        .with_ansi_sanitization(!unsanitized)
         .event_format(format);
 
     tracing_subscriber::registry()
         .with(build_filter(config)?)
         .with(fmt_layer)
         .try_init()
-        .change_context(Error("Failed to set logger".into()))
+        .change_context(Error("Failed to set logger".into()))?;
+
+    if unsanitized {
+        tracing::warn!(
+            "Log sanitization disabled by FLOR_LOG_UNSANITIZED: messages may carry terminal escapes"
+        );
+    }
+
+    Ok(())
+}
+
+/// Reads an opt-in flag from the environment: set to anything but empty or `0`.
+fn env_flag(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Maps the `Config` filters onto an `EnvFilter`, with `RUST_LOG` taking precedence.
