@@ -10,8 +10,8 @@
 //! handler carries that connection's identity without being passed it.
 //!
 //! Call [`init`] or [`init_with_config`] once per process, before anything logs.
-//! `RUST_LOG` overrides the [`Config`] filters and accepts the usual
-//! `target=level` syntax. `FLOR_LOG_UNSANITIZED=1` lets escape sequences carried
+//! `RUST_LOG` layers over the [`Config`] filters, in `tracing`'s directive
+//! syntax. `FLOR_LOG_UNSANITIZED=1` lets escape sequences carried
 //! inside a message reach the terminal — colored error stacks at the cost of the
 //! terminal-injection defense; it is ignored unless stderr is a terminal.
 
@@ -118,7 +118,11 @@ impl Default for Config {
 
 /// Initializes the global logger by default `Config` with global log filter.
 ///
-/// `RUST_LOG` environment variable can be used to override the log filter settings.
+/// `RUST_LOG` environment variable can be used to override the log filter
+/// settings; see [`init_with_config`] for how the two combine, and [`EnvFilter`
+/// directives][directives] for the syntax it accepts.
+///
+/// [directives]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives
 ///
 /// ### Arguments
 /// - `log_level`: sets global level filter of the logger
@@ -141,6 +145,16 @@ pub fn init(log_level: LevelFilter) -> Result<(), Report<Error>> {
 /// Priority of log filter settings in decending order:
 /// 1. `RUST_LOG` environment variable,
 /// 2. Custom filter settings from `Config` passed to this function.
+///
+/// The two compose rather than replace one another: `RUST_LOG` wins for the
+/// targets it names, and the `Config` filters still govern every other target.
+/// So `RUST_LOG=quinn=trace` raises that one component and leaves the rest where
+/// the `Config` put them. `RUST_LOG` accepts [`EnvFilter` directives][directives]
+/// — `target[span{field=value}]=level`, which is `env_logger`'s syntax extended
+/// with span and field selectors, and without its trailing `/regex` message
+/// filter.
+///
+/// [directives]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives
 ///
 /// ### Arguments
 /// - `config`: custom configuration for the logger
@@ -193,8 +207,9 @@ pub fn init_with_config(config: &Config) -> Result<(), Report<Error>> {
         .with_ansi_sanitization(!unsanitized)
         .event_format(format);
 
+    let rust_log = std::env::var("RUST_LOG").ok();
     tracing_subscriber::registry()
-        .with(build_filter(config)?)
+        .with(build_filter(config, rust_log.as_deref())?)
         .with(fmt_layer)
         .try_init()
         .change_context(Error("Failed to set logger".into()))?;
@@ -213,7 +228,14 @@ fn env_flag(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| !value.is_empty() && value != "0")
 }
 
-/// Maps the `Config` filters onto an `EnvFilter`, with `RUST_LOG` taking precedence.
+/// Maps the `Config` filters onto an `EnvFilter`, with `rust_log` — the value of
+/// `RUST_LOG` — layered on top of them.
+///
+/// The env directives are appended after the `Config` ones rather than replacing
+/// them, so that a component-only value such as `RUST_LOG=quinn=trace` raises that
+/// one component while everything else stays at the level the `Config` asked for.
+/// A directive naming the same target as an earlier one supersedes it, which is
+/// what makes `RUST_LOG` win where the two overlap.
 ///
 /// The two sources are parsed with deliberately different strictness. `RUST_LOG`
 /// is operator input typed at runtime, so an unusable directive is dropped with a
@@ -223,20 +245,24 @@ fn env_flag(name: &str) -> bool {
 ///
 /// On the other hand, `Config` directives are programmer input, so a malformed one
 /// is a bug and fails initialization instead of being skipped.
-fn build_filter(config: &Config) -> Result<tracing_subscriber::EnvFilter, Report<Error>> {
-    if let Ok(env) = std::env::var("RUST_LOG")
-        && !env.is_empty()
-    {
-        return Ok(tracing_subscriber::EnvFilter::new(env));
-    }
-
+fn build_filter(
+    config: &Config,
+    rust_log: Option<&str>,
+) -> Result<tracing_subscriber::EnvFilter, Report<Error>> {
     let mut directives = vec![config.global_log_filter.to_string()];
     for (module, level) in &config.modules_log_filter {
         directives.push(format!("{module}={level}"));
     }
     let directives = directives.join(",");
-    tracing_subscriber::EnvFilter::try_new(&directives)
-        .change_context_lazy(|| Error(format!("Invalid log filter directives: '{directives}'")))
+    let filter = tracing_subscriber::EnvFilter::try_new(&directives)
+        .change_context_lazy(|| Error(format!("Invalid log filter directives: '{directives}'")))?;
+
+    match rust_log {
+        Some(env) if !env.is_empty() => Ok(tracing_subscriber::EnvFilter::new(format!(
+            "{directives},{env}"
+        ))),
+        _ => Ok(filter),
+    }
 }
 
 /// Renders one event as `<time> <LEVEL> <component>: <spans> <message+fields>`.
@@ -389,5 +415,62 @@ mod tests {
     fn write_module_target_more_than_limit() {
         let long_target = "my_very_long_crate_name_module_submodule::submodule";
         assert_eq!(shorten_target(long_target), "my_very_long_crate_n");
+    }
+
+    fn directives_of(config: &Config, rust_log: Option<&str>) -> Vec<String> {
+        let mut directives: Vec<String> = build_filter(config, rust_log)
+            .expect("filter builds")
+            .to_string()
+            .split(',')
+            .map(str::to_owned)
+            .collect();
+        directives.sort();
+        directives
+    }
+
+    #[test]
+    fn config_filters_apply_without_env() {
+        let config = Config::new()
+            .global_log_filter(LevelFilter::INFO)
+            .module_log_filter("quinn".into(), LevelFilter::WARN);
+        assert_eq!(directives_of(&config, None), ["info", "quinn=warn"]);
+    }
+
+    /// A component-only `RUST_LOG` raises that component and leaves the global
+    /// level from `Config` in place, rather than silencing everything else.
+    #[test]
+    fn env_component_directive_keeps_config_global_level() {
+        let config = Config::new().global_log_filter(LevelFilter::INFO);
+        assert_eq!(
+            directives_of(&config, Some("quinn=trace")),
+            ["info", "quinn=trace"]
+        );
+    }
+
+    #[test]
+    fn env_supersedes_config_for_the_same_target() {
+        let config = Config::new()
+            .global_log_filter(LevelFilter::INFO)
+            .module_log_filter("quinn".into(), LevelFilter::WARN);
+        assert_eq!(
+            directives_of(&config, Some("debug,quinn=trace")),
+            ["debug", "quinn=trace"]
+        );
+    }
+
+    /// An unusable `RUST_LOG` directive is dropped, and the rest still applies.
+    #[test]
+    fn env_bad_directive_is_ignored() {
+        let config = Config::new().global_log_filter(LevelFilter::INFO);
+        assert_eq!(
+            directives_of(&config, Some("quinn=debgu,flor=debug")),
+            ["flor=debug", "info"]
+        );
+    }
+
+    #[test]
+    fn invalid_config_directive_fails_init() {
+        let config = Config::new().module_log_filter("quinn=".into(), LevelFilter::WARN);
+        assert!(build_filter(&config, None).is_err());
     }
 }
