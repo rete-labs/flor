@@ -18,6 +18,7 @@ Treat an implementation plan as supporting evidence, not as higher authority tha
 
 - Inspect the current branch and worktree before deciding scope.
 - Use `github-issue-discovery.md`, `documentation-lookup.md`, and `adr-discovery.md` as needed.
+- Resolve the task's milestone and read its design documents whenever the change touches a designed component; read the high-level design before reasoning about networking behavior. Both are covered by `documentation-lookup.md`.
 - Prefer explicit task evidence over assumptions inferred from nearby code.
 - Continue with the best available evidence when an issue, document, ADR, or plan cannot be accessed.
 - Do not expand the requested task merely because related improvements are visible.

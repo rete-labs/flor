@@ -29,7 +29,7 @@ Use this exact fallback order when reading GitHub issues:
 1. GitHub CLI:
 
    ```sh
-   gh issue view <number> --json number,title,state,labels,body,comments,url
+   gh issue view <number> --json number,title,state,labels,milestone,body,comments,url
    ```
 
 2. GitHub MCP, if available.
@@ -37,3 +37,21 @@ Use this exact fallback order when reading GitHub issues:
 4. Continue the task using documentation and source code if the issue cannot be accessed.
 
 If issue access requires network or authentication and is unavailable, state the limitation briefly in assumptions or test gaps. Continue with the best reconstructed intent.
+
+## Determining The Milestone
+
+The issue's `milestone` field names the Florete milestone the task belongs to, for example `C0. Tended Tunnels`. Use it to select the milestone design documents described in `documentation-lookup.md`.
+
+The field is often unset. In that order, fall back to:
+
+1. A milestone stated by the user, the PR description, or the issue body.
+2. The milestone of a linked or parent issue.
+3. The milestone whose design documents cover the changed components.
+
+Milestones can also be listed directly:
+
+```sh
+gh api "repos/:owner/:repo/milestones?state=all" --jq '.[].title'
+```
+
+The milestone bounds the task, not the design context. Read neighbouring milestones as well when the changed component is designed across several of them.

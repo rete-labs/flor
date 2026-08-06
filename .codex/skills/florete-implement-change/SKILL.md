@@ -9,4 +9,4 @@ Read and follow the canonical skill at:
 
 `../../../.agents/florete/skills/florete-implement-change/SKILL.md`
 
-Do not duplicate implementation guidance here. The `.agents/florete` tree is shared with Claude Code.
+Do not duplicate implementation guidance here. The `.agents/florete` tree is shared with other AI agents.
