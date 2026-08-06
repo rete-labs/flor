@@ -30,7 +30,7 @@ Determine the review target with `review-scope.md`:
 - Otherwise inspect the current branch, status, changed files, diff stats, and likely base branch.
 - Keep review scope tied to the task. Do not review unrelated local changes unless they affect the target.
 
-Reconstruct intended behavior and constraints with `task-intent.md`. Continue when optional external context is unavailable.
+Reconstruct intended behavior and constraints with `task-intent.md`. Its Context Discovery steps are obligations, not suggestions: read the branch's issue rather than only inferring its number. Continue without a source only after an attempt at it has failed, and report that gap as a verification limitation.
 
 ## Domain Guidance Selection
 

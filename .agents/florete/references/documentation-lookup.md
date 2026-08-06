@@ -22,6 +22,7 @@ Resolve these from the selected documentation root when they are relevant:
 
 - `contributing/development/conventions.md` - coding, testing, error handling, and API conventions.
 - `contributing/workflows/git-workflow.mdx` - branch naming and merge workflow.
+- `contributing/workflows/issue-tracking.mdx` - multi-repository issue tracking and issue reference forms.
 - `contributing/workflows/code-review/reviewer-guide.md` - project review guidance.
 - `overview/high-level-design.mdx` - Florete networking model, planes, and core concepts. Read it for any networking-related change or review before relying on assumptions about how the network behaves.
 - `implementation/adr/` - architecture decision records and their index.

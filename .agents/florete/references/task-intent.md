@@ -17,8 +17,9 @@ Treat an implementation plan as supporting evidence, not as higher authority tha
 ## Context Discovery
 
 - Inspect the current branch and worktree before deciding scope.
-- Use `github-issue-discovery.md`, `documentation-lookup.md`, and `adr-discovery.md` as needed.
+- **Resolve and read the related issue.** Derive its number from the user's target or the branch, read the issue itself in the repository it belongs to, and read its cross-repository counterpart when one exists — per `github-issue-discovery.md`. Identifying the number is not a substitute for reading the issue. Attempt this on every task; treat the issue as unavailable only after a lookup has actually failed.
+- Use `documentation-lookup.md` and `adr-discovery.md` as the task requires.
 - Resolve the task's milestone and read its design documents whenever the change touches a designed component; read the high-level design before reasoning about networking behavior. Both are covered by `documentation-lookup.md`.
 - Prefer explicit task evidence over assumptions inferred from nearby code.
-- Continue with the best available evidence when an issue, document, ADR, or plan cannot be accessed.
+- Continue with the best available evidence when an issue, document, ADR, or plan cannot be accessed **after an attempt**, and name the missing source in the final report.
 - Do not expand the requested task merely because related improvements are visible.
