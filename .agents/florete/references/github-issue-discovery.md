@@ -67,9 +67,9 @@ git remote get-url origin
 
 Because the same number exists in the other repositories, confirm the issue's title and body actually describe the branch's work. If they do not, the number likely refers to a different repository — check the others before treating the issue as unavailable. When the branch's work has a counterpart issue elsewhere, read both.
 
-## Issue Access Fallback Order
+## Issue Access
 
-Use this exact fallback order when reading GitHub issues:
+Use whichever GitHub access the environment already provides. Prefer the GitHub CLI when more than one is available: it composes with `git` and `rg`, and `gh api` reaches endpoints a curated tool set omits.
 
 1. GitHub CLI, with the repository named explicitly:
 
@@ -78,9 +78,10 @@ Use this exact fallback order when reading GitHub issues:
      --json number,title,state,labels,milestone,body,comments,url
    ```
 
-2. GitHub MCP, if available.
-3. Other available GitHub tooling.
-4. Continue the task using documentation and source code if the issue cannot be accessed.
+2. GitHub MCP or other available GitHub tooling. Expect these instead of `gh` in environments without a shell or without an authenticated CLI. The repository must still be named explicitly; these tools default to no repository rather than to the current checkout.
+3. Continue the task using documentation and source code if the issue cannot be accessed.
+
+This reference covers reading. Writing to GitHub — filing issues, commenting, labelling, changing state — is a task the user asks for, not a step in issue discovery. Do not publish findings or task results to GitHub on your own initiative.
 
 If issue access requires network or authentication and is unavailable, state the limitation briefly in assumptions or test gaps. Continue with the best reconstructed intent.
 
