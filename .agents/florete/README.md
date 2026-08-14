@@ -6,6 +6,7 @@ This directory is the source of truth for shared, tool-agnostic AI agent guidanc
 
 - `skills/florete-implement-change/` - implementation workflow.
 - `skills/florete-code-review/` - code review workflow.
+- `skills/florete-design-change/` - design workflow, for the documentation repository's design pages.
 - `skills/florete-review-*/` - thin focused-review adapters.
 - `references/discovery/` - locating the task's issue, documentation, and ADRs.
 - `references/domain/` - the constraints a change is judged against.
