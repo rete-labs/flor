@@ -11,16 +11,16 @@ Use this skill for code reviews in the Florete repository. This is the default r
 
 Read these before conducting the review:
 
-- `../../references/task-intent.md`
-- `../../references/review-scope.md`
-- `../../references/review-output-format.md`
+- `../../references/process/task-intent.md`
+- `../../references/process/review-scope.md`
+- `../../references/process/review-output-format.md`
 
 Use these references as the task requires:
 
-- `../../references/github-issue-discovery.md`
-- `../../references/documentation-lookup.md`
-- `../../references/adr-discovery.md`
-- `../../references/verification-commands.md`
+- `../../references/discovery/github-issue-discovery.md`
+- `../../references/discovery/documentation-lookup.md`
+- `../../references/discovery/adr-discovery.md`
+- `../../references/process/verification-commands.md`
 
 ## Orchestration Responsibilities
 
@@ -36,15 +36,15 @@ Reconstruct intended behavior and constraints with `task-intent.md`. Its Context
 
 Always consider:
 
-- `../../references/correctness.md`
-- `../../references/testing.md`
+- `../../references/domain/correctness.md`
+- `../../references/domain/testing.md`
 
 Read additional guidance when relevant:
 
-- `../../references/architecture.md` for module layout, public APIs, dependency direction, new abstractions, or ADR-sensitive design.
-- `../../references/async-lifecycle.md` for Tokio, tasks, channels, cancellation, shutdown, DI lifecycle, or resource cleanup.
-- `../../references/security.md` for SPIFFE/SVID, mTLS, identity, certificates, trust domains, authorization, secrets, or cryptography.
-- `../../references/errors-observability.md` for error handling, logging, diagnostics, CLI failures, or observability behavior.
+- `../../references/domain/architecture.md` for module layout, public APIs, dependency direction, new abstractions, or ADR-sensitive design.
+- `../../references/domain/async-lifecycle.md` for Tokio, tasks, channels, cancellation, shutdown, DI lifecycle, or resource cleanup.
+- `../../references/domain/security.md` for SPIFFE/SVID, mTLS, identity, certificates, trust domains, authorization, secrets, or cryptography.
+- `../../references/domain/errors-observability.md` for error handling, logging, diagnostics, CLI failures, or observability behavior.
 
 Do not load every domain reference by default. Treat selected guidance as review criteria and deduplicate overlapping findings.
 

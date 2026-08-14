@@ -1,6 +1,6 @@
 # Architecture
 
-Use `documentation-lookup.md` and `adr-discovery.md` to resolve relevant project guidance. Apply these constraints while designing, implementing, or evaluating a change:
+Use `../discovery/documentation-lookup.md` and `../discovery/adr-discovery.md` to resolve relevant project guidance. Apply these constraints while designing, implementing, or evaluating a change:
 
 - Place new code in the module that owns the concept.
 - Keep public visibility no broader than needed.

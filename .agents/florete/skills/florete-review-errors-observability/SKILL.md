@@ -9,11 +9,11 @@ Use this adapter for an explicitly focused errors and observability review.
 
 Read and apply:
 
-- `../../references/task-intent.md`
-- `../../references/review-scope.md`
-- `../../references/errors-observability.md`
-- `../../references/documentation-lookup.md`
-- `../../references/review-output-format.md`
-- `../../references/verification-commands.md`
+- `../../references/process/task-intent.md`
+- `../../references/process/review-scope.md`
+- `../../references/domain/errors-observability.md`
+- `../../references/discovery/documentation-lookup.md`
+- `../../references/process/review-output-format.md`
+- `../../references/process/verification-commands.md`
 
 Report only error-handling, diagnostics, or observability findings. Do not duplicate security or async findings unless the problem is specifically diagnostic.

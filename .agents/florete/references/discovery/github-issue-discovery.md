@@ -1,6 +1,6 @@
 # GitHub Issue Discovery
 
-Use this reference only to locate and read a related GitHub issue. `task-intent.md` owns the overall priority between user instructions, issues, documentation, ADRs, implementation plans, code, and tests.
+Use this reference only to locate and read a related GitHub issue. `../process/task-intent.md` owns the overall priority between user instructions, issues, documentation, ADRs, implementation plans, code, and tests.
 
 Prefer an issue explicitly provided by the user or linked from the PR. Otherwise infer it from the branch name according to the Florete git workflow. The task must never stop solely because the issue is unavailable.
 
