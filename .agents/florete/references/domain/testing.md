@@ -12,4 +12,4 @@ Apply these constraints when adding or evaluating evidence for a change:
 - Keep fixtures minimal and make the relevant condition visible.
 - Identify changed branches that remain unverified.
 
-Use `verification-commands.md` to select the commands that exercise this evidence.
+Use `../process/verification-commands.md` to select the commands that exercise this evidence.

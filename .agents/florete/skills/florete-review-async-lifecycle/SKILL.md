@@ -9,10 +9,10 @@ Use this adapter for an explicitly focused async and lifecycle review.
 
 Read and apply:
 
-- `../../references/task-intent.md`
-- `../../references/review-scope.md`
-- `../../references/async-lifecycle.md`
-- `../../references/review-output-format.md`
-- `../../references/verification-commands.md`
+- `../../references/process/task-intent.md`
+- `../../references/process/review-scope.md`
+- `../../references/domain/async-lifecycle.md`
+- `../../references/process/review-output-format.md`
+- `../../references/process/verification-commands.md`
 
 Report only async or lifecycle-specific findings. Do not duplicate general correctness or testing findings.

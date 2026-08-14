@@ -1,6 +1,6 @@
 # Errors And Observability
 
-Resolve and apply the relevant sections of `contributing/development/conventions.md` through `documentation-lookup.md`.
+Resolve and apply the relevant sections of `contributing/development/conventions.md` through `../discovery/documentation-lookup.md`.
 
 ## Error Handling
 

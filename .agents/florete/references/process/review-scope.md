@@ -31,9 +31,9 @@ Then inspect changed files and targeted diffs from the selected base. If no base
 
 ## Branch Issue Convention
 
-When branch names include a numeric path segment, such as `feat/30/add-retectl-validate`, treat the number as the likely GitHub issue unless documentation says otherwise. Then read that issue through `github-issue-discovery.md` before reviewing — a review that only inferred the number never saw the requirements it is judging the change against.
+When branch names include a numeric path segment, such as `feat/30/add-retectl-validate`, treat the number as the likely GitHub issue unless documentation says otherwise. Then read that issue through `../discovery/github-issue-discovery.md` before reviewing — a review that only inferred the number never saw the requirements it is judging the change against.
 
-When branch naming, merge strategy, or other repository workflow rules matter, resolve `contributing/workflows/git-workflow.mdx` through `documentation-lookup.md`. Do not duplicate the full project workflow here.
+When branch naming, merge strategy, or other repository workflow rules matter, resolve `contributing/workflows/git-workflow.mdx` through `../discovery/documentation-lookup.md`. Do not duplicate the full project workflow here.
 
 ## Context Budget
 

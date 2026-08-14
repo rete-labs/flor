@@ -9,14 +9,14 @@ Use this skill as the default entry point for code changes in the Florete reposi
 
 ## Shared Context
 
-Read `../../references/task-intent.md` before implementation.
+Read `../../references/process/task-intent.md` before implementation.
 
 Use these references as the task requires:
 
-- `../../references/github-issue-discovery.md`
-- `../../references/documentation-lookup.md`
-- `../../references/adr-discovery.md`
-- `../../references/verification-commands.md`
+- `../../references/discovery/github-issue-discovery.md`
+- `../../references/discovery/documentation-lookup.md`
+- `../../references/discovery/adr-discovery.md`
+- `../../references/process/verification-commands.md`
 
 ## Workflow
 
@@ -33,14 +33,14 @@ Do not turn optional related improvements into required scope. Stop for directio
 
 Always consider:
 
-- `../../references/correctness.md`
-- `../../references/testing.md`
+- `../../references/domain/correctness.md`
+- `../../references/domain/testing.md`
 
 Read additional guidance when relevant:
 
-- `../../references/architecture.md` for module layout, public APIs, dependency direction, new abstractions, or ADR-sensitive design.
-- `../../references/async-lifecycle.md` for Tokio, tasks, channels, cancellation, shutdown, DI lifecycle, or resource cleanup.
-- `../../references/security.md` for SPIFFE/SVID, mTLS, identity, certificates, trust domains, authorization, secrets, or cryptography.
-- `../../references/errors-observability.md` for error handling, logging, diagnostics, CLI failures, or observability behavior.
+- `../../references/domain/architecture.md` for module layout, public APIs, dependency direction, new abstractions, or ADR-sensitive design.
+- `../../references/domain/async-lifecycle.md` for Tokio, tasks, channels, cancellation, shutdown, DI lifecycle, or resource cleanup.
+- `../../references/domain/security.md` for SPIFFE/SVID, mTLS, identity, certificates, trust domains, authorization, secrets, or cryptography.
+- `../../references/domain/errors-observability.md` for error handling, logging, diagnostics, CLI failures, or observability behavior.
 
 Do not load every domain reference by default.

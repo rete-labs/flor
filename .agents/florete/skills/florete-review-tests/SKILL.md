@@ -9,10 +9,10 @@ Use this adapter for an explicitly focused tests and coverage review.
 
 Read and apply:
 
-- `../../references/task-intent.md`
-- `../../references/review-scope.md`
-- `../../references/testing.md`
-- `../../references/verification-commands.md`
-- `../../references/review-output-format.md`
+- `../../references/process/task-intent.md`
+- `../../references/process/review-scope.md`
+- `../../references/domain/testing.md`
+- `../../references/process/verification-commands.md`
+- `../../references/process/review-output-format.md`
 
 Report only test quality, coverage, fixture, or verification-evidence findings. Do not treat missing optional coverage tooling as a code failure.

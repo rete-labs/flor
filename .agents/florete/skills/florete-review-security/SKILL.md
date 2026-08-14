@@ -9,11 +9,11 @@ Use this adapter for an explicitly focused security review.
 
 Read and apply:
 
-- `../../references/task-intent.md`
-- `../../references/review-scope.md`
-- `../../references/security.md`
-- `../../references/documentation-lookup.md`
-- `../../references/review-output-format.md`
-- `../../references/verification-commands.md`
+- `../../references/process/task-intent.md`
+- `../../references/process/review-scope.md`
+- `../../references/domain/security.md`
+- `../../references/discovery/documentation-lookup.md`
+- `../../references/process/review-output-format.md`
+- `../../references/process/verification-commands.md`
 
 Report only security-relevant findings. General error style and test coverage belong to their own review domains.
