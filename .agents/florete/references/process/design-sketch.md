@@ -53,6 +53,10 @@ Inside a block, a two-column layout — a label and its clause — reads faster 
 
 `shape.md` emerges when the target is read, and is amended as decisions land — **never regenerated from the verdicts**. Regeneration loses what incremental amendment keeps: a one-shot rewrite has no memory of what each decision was reacting to, and produces something thinner than the sketch it replaced.
 
+**The shape has no identifier scheme, deliberately.** Findings and axes carry identifiers because they persist and are cited for days; a pointer into the shape lives for one exchange. Address a block by its caption and its label — *RULES / media*, *FLOW, the migration step* — which needs no assignment, survives a reordering, and cannot be mistaken for an axis or a finding. Quote the line where a block has no labels.
+
+`shape.md` is where the shape lives, and chat carries a link to it and the argument about it, never a copy: a pasted shape is stale the moment the next decision lands.
+
 At record, **compact** it into the page — the same operation the verdicts undergo — rather than copying the working file, which would carry working detail into a compact artifact.
 
 On the page the shape **opens the internals**, because the sections that follow hang in the air without it, while the decision log ends the page. Both stay visible; neither is collapsed behind a cut.
