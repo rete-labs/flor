@@ -51,16 +51,16 @@ Detect the mode before anything else; it decides where the shape comes from.
 
 Curation is a precondition of revision on a page with no skeleton. It may hand its fresh skeleton straight to revision inside one pass when the human asks for both. Whether it covers the whole page or only what the change touches is the human's call; ask when the scope does not imply it.
 
-**Findings** — contradictions and gaps in existing prose — arise in revision and curation only. Report each when found, hold them across the whole pass, and act on them at prose with a suggested action each: fix inline, file a ticket, ignore.
+**Findings** — contradictions and gaps in existing prose — arise in revision and curation only. Each goes into `findings.md` when found, under an `FN-` identifier, and stays there for the whole pass; chat carries the argument about it, never the list. They are acted on at prose with a suggested action each: fix inline, file a ticket, ignore.
 
 ## Stages And Gates
 
 | Stage | Read first | Produces | Its gate clears when |
 | --- | --- | --- | --- |
 | read | `design-sketch.md` | `shape.md`, from the target page, its cross-references, related ADRs and the ticket | no gate |
-| axes | `decision-log.md` | the human's list, then one merged canonical list | the merged list is agreed |
-| options | | candidates, criterion and dependency per axis | the candidates are agreed |
-| verdicts | | pick, because, accepting, rejected per axis | every axis is ratified |
+| axes | `decision-log.md` | two independent lists, then `decisions.md` carrying one merged canonical list | the merged list is agreed |
+| options | | candidates, criterion and dependency, added to each axis in `decisions.md` | the candidates are agreed |
+| verdicts | | pick, because, accepting, rejected, added to each axis in `decisions.md` | every axis is ratified |
 | record | | the skeleton written into the page | it renders and the human picks: prose now, or stop |
 | prose | | orient, surface, internals | no gate; it ends when the human calls it done |
 
@@ -97,14 +97,23 @@ Write orient last, once the sections it routes to exist.
 
 `design-wip/<ticket>-<topic>/` in the repository holding the target page — florete for a normal design, which ignores that directory. Prefix the repository name to a ticket from elsewhere, as topic branches do: `flor-81-design-change`.
 
-| File | Medium | Notes |
-| --- | --- | --- |
-| `axes.md` | form | create its heading, structure and one worked example, then never write content into it |
-| `options.md` | form | create it carrying the agreed axis list, so the human fills rather than transcribes |
-| `shape.md` | workspace | yours, amended as decisions land, never regenerated from the verdicts |
-| `verdicts.md` | workspace | a counter, an open group, and a closed group below a separator |
+| File | Medium | Life | Notes |
+| --- | --- | --- | --- |
+| `axes-human.md` | form | sealed at the merge | create its heading, structure and one worked example asking for plain sequential numbering, then never write content into it |
+| `axes-agent.md` | workspace | sealed at the merge | your own axis list, written before you read theirs |
+| `decisions.md` | workspace | live to the end of the pass | one block per axis, growing from question to candidates to verdict |
+| `shape.md` | workspace | live to the end of the pass | amended as decisions land, never regenerated from the verdicts |
+| `findings.md` | workspace | live to the end of the pass | one `FN-` entry per finding, appended, never renumbered |
 
-A form is filled by the human. A workspace is yours to keep amending, and the human comments on it by ID in chat. Everything else you produce is a report, read once in chat — except the two handoffs, which are filed in the same directory because they cross a session:
+**Both lists are written independently.** Yours goes to `axes-agent.md` before you read theirs; the merge then produces `decisions.md`, and both starting lists are sealed — they are the record of what the merge did to their items. Suggest deleting the sealed files at record, where nothing reads them any more; never delete them unasked.
+
+**`decisions.md` is one file that grows.** An axis keeps its full option list with the pick marked, open and closed alike — a rejection reason without the option it rejects cannot be reviewed. Compaction happens once, at record, and not before. Show a counter, an open group, and a closed group below a separator.
+
+**Live files stay current for the whole pass, prose included.** A decision that changes while prose is being written changes in `decisions.md` at that moment. Sealed files are left exactly where their stage ended and are never walked back to.
+
+A form is filled by the human. A workspace is yours, and the human may also amend it in place. **Never rewrite a shared file wholesale — edit in place**, or a human edit disappears without a diff. Chat carries pointers and argument, never a copy of a file: link the file rather than pasting its contents, and address the shape by its block caption and label rather than by any identifier.
+
+Everything else you produce is a report, read once in chat — except the two handoffs, which are filed in the same directory because they cross a session:
 
 - `prose-handoff.md`, at gate 4 and only when prose is deferred: findings, deliberate deferrals, cross-page effects, the framings that emerged in argument without becoming decisions, plus the implementation notes gathered so far.
 - `impl-handoff.md`, always, at the end of the pass: migration steps, current-state facts, ordering — the plan-shaped material the skeleton refuses.

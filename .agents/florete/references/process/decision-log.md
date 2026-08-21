@@ -2,7 +2,7 @@
 
 The decision artifacts of a design pass, from an open axis to a committed log entry. Used by `florete-design-change`. The shape — the skeleton's other half — is covered by `design-sketch.md`.
 
-Three artifacts precede the log: axes name what is unsettled, options give each axis its candidates, verdicts pick one. Record compacts the verdicts into the log.
+Axes name what is unsettled, options give each axis its candidates, verdicts pick one. All three live in a single file, `decisions.md`, where an axis is one block that grows: question, then candidates, then verdict. Record compacts that file into the log; nothing is compacted before.
 
 ## Axes
 
@@ -13,7 +13,7 @@ B6. Decision ID scheme. The ID's shape, and whether it is scoped to a page
     or to a topic spanning milestones.
 ```
 
-Group axes into lettered topics with a sequence inside each — `A1`, `A2`, `B1` — so an item can be inserted, split or closed without renumbering the rest.
+**The merged list** is grouped into lettered topics with a sequence inside each — `A1`, `A2`, `B1` — so an item can be inserted, split or closed without renumbering the rest. That scheme belongs to the merged list alone: the form you create for the human asks for plain sequential numbering, because two lists sharing one scheme make the merge's back-references ambiguous.
 
 Three rules govern the list:
 
@@ -21,9 +21,11 @@ Three rules govern the list:
 - **Admission.** It survives if a competent person could reasonably choose otherwise **and** the choice changes the artifact.
 - **Widening.** A human item the rule would have rejected means the rule is too narrow. Widen the rule; do not argue the item down.
 
-**The human's list comes first, and you do not read it before writing your own.** Then return **one merged canonical list** — not a diff, and not your new items alone. Mark provenance only where you transformed something: `(yours 2)` for an item taken as it stood, `(from your 2, split)` where it was reshaped. Marking every item is noise; what needs verifying is distortion, and distortion only happens at a transform. Add an explicit line naming anything you dropped, and why — silence about a dropped item is the one loss the human cannot detect.
+**Both lists are written independently.** Yours goes to `axes-agent.md` before you read theirs; generating independently covers more ground than reacting to a list already written. Then return **one merged canonical list** — not a diff, and not your new items alone. Mark provenance only where you transformed something: `(yours 2)` for an item taken as it stood, `(from your 2, split)` where it was reshaped. Marking every item is noise; what needs verifying is distortion, and distortion only happens at a transform. Add an explicit line naming anything you dropped, and why — silence about a dropped item is the one loss the human cannot detect.
 
 The human's own list needs no numbering scheme of yours. Its only requirement is that its items be referenceable, because the merge points back at them.
+
+The merged list opens `decisions.md`, carrying the axes alone. **Ask who fills the candidates**: offer to fill them yourself for the human to amend, which is what a list of any size needs, and take their answer. The sequencing rule — their list before yours — governs axes, and has no counterpart here.
 
 ## Options
 
@@ -58,7 +60,7 @@ Rejected (i), which needs a cross-milestone register; (iii), which loses the
 topic identity that makes CTRL mean something.
 ```
 
-Closing an item in `verdicts.md` compacts it to its question, verdict, one-clause reason and its rejections — the same compression record performs, so the file converges toward the log as the pass proceeds.
+**A closed axis keeps everything it had.** Its full option list stays, with the pick marked, exactly as an open one — a rejection reason read apart from the option it rejects cannot be reviewed, and reviewing is what the file is for. Closing moves the block below the separator and adds the verdict; it removes nothing. Compression happens once, at record.
 
 **Flag ADR candidates here.** A decision whose reach extends past the page is an ADR candidate, and the reach is known when the verdict is written, not before. The human decides; the ADR is written outside this skill.
 
