@@ -48,6 +48,8 @@ Depends on B20, where the mnemonic is declared — which only bites under (i).
 
 The **criterion** is the test that separates the candidates, and it is usually the expensive part: once it is right, the pick is often obvious. **Dependency** names an axis that must be settled first because its verdict changes what candidates the others have. State it in prose where it exists, which is rarely.
 
+**For every consumer or channel the design defers, name the one property it needs from the shape.** A deferred thing is not covered by the axes, which describe what is being built now — so an incompatibility with it surfaces late, when the design is already settled, or never. The question is cheap and belongs here, where its answer can still open an axis.
+
 **Cover every axis**, including trivial and single-option ones, which get a line each. Skipping is how an invisible omission enters, and "only one candidate, and here is why" is exactly what a later reader would otherwise wonder about.
 
 ## Verdicts
@@ -65,6 +67,8 @@ topic identity that makes CTRL mean something.
 ```
 
 **A closed axis keeps everything it had.** Its full option list stays, with the pick marked, exactly as an open one — a rejection reason read apart from the option it rejects cannot be reviewed, and reviewing is what the file is for. Closing moves the block below the separator and adds the verdict; it removes nothing. Compression happens once, at record.
+
+**A flipped pick sweeps the closed group.** Closing an axis does not protect it: a verdict taken later can invalidate one taken earlier, and nothing else looks. So when a pick changes, walk the closed group for decisions that rested on it and reopen those that no longer hold. It is a judgement rather than a check — nothing enumerates the dependants — and it runs at the flip, while the reasoning that caused it is still in hand.
 
 **Name the claims a pick rests on.** Where the reasoning depends on a fact about the world rather than on judgement — that a channel exists, that a file is written where you think, that a release has shipped — state the claim and how it was checked. Reasoning quality does not distinguish a sound argument from a sound argument built on a false premise; naming the premise is what makes the gap visible to the person who may know better.
 
