@@ -95,6 +95,8 @@ Write orient last, once the sections it routes to exist.
 
 Prose is a stage like any other and clears its own gate. **A decision taken during it still enters through decisions.** Reviewing prose raises new questions, and answering one in the prose itself is the easiest mistake in the pass: the stage is active, the question looks small, and the log quietly stops describing the page. Name the axis, give its candidates, propose a verdict — **all three in one turn**, since the requirement is that the decision is recorded before the prose changes, not that it walks the gates again. Once it is ratified, `decisions.md` gains its block and the prose is rewritten from it. Edit prose directly only when the human asks for that.
 
+**Before the pass ends, walk the log.** For each entry, ask three things: does the prose assert it, does the prose contradict it, and is the prose silent where a reader needs it. Every entry ends at one of three answers — write, fix, or **no prose needed**, which is a real answer and the one that keeps the walk honest, since plenty of entries are internal and want no prose at all. This is a check rather than a writing method: prose written entry by entry comes out log-shaped, and the log is the compressed subset of prose by construction. In revision it doubles as the rewrite order, because there the log is new and the prose is old.
+
 ## Working Files
 
 `design-wip/<ticket>-<topic>/` in the repository holding the target page — florete for a normal design, which ignores that directory. Prefix the repository name to a ticket from elsewhere, as topic branches do: `flor-81-design-change`.
@@ -115,7 +117,7 @@ Show a counter and, below it, **open**, **inferred** and **closed** groups. Infe
 
 **Live files stay current for the whole pass, prose included.** A decision that changes while prose is being written changes in `decisions.md` at that moment. Sealed files are left exactly where their stage ended and are never walked back to.
 
-A form is filled by the human. A workspace is yours, and the human may also amend it in place. **Never rewrite a shared file wholesale — edit in place**, or a human edit disappears without a diff. Chat carries pointers and argument, never a copy of a file: link the file rather than pasting its contents, and address the shape by its block caption and label rather than by any identifier.
+A form is filled by the human. A workspace is yours, and the human may also amend it in place. **Never rewrite a shared file wholesale — edit in place**, or a human edit disappears without a diff. Chat carries pointers and argument, never a copy of a file: link the file as a clickable link rather than naming a bare path, and address the shape by its block caption and label rather than by any identifier. **Do not hard-wrap prose** in these files — one paragraph is one line, since the reader soft-wraps at a width you do not know. Fixed-width blocks are the exception, and they belong inside a fence.
 
 Everything else you produce is a report, read once in chat — except `impl-handoff.md`, which is filed in the same directory because it crosses a session. **It always ends the pass**, and carries the plan-shaped material the skeleton refuses: migration steps, current-state facts, ordering.
 

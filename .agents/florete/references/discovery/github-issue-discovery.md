@@ -78,6 +78,8 @@ Use whichever GitHub access the environment already provides. Prefer the GitHub 
      --json number,title,state,labels,milestone,body,comments,url
    ```
 
+   Prefer this `--json` form over the flag forms — `--comments` and friends have returned empty output under agent execution where the same call works in a terminal. `--json` returns body and comments together, and an empty `comments` array is an answer rather than a failure.
+
 2. GitHub MCP or other available GitHub tooling. Expect these instead of `gh` in environments without a shell or without an authenticated CLI. The repository must still be named explicitly; these tools default to no repository rather than to the current checkout.
 3. Continue the task using documentation and source code if the issue cannot be accessed.
 
