@@ -90,7 +90,7 @@ Only the ID line, the statement and *Because* are mandatory. Keep the field orde
 An ID is a topic mnemonic, a milestone segment, and a sequence restarting per milestone: `CTRL-C0-01`. Pages outside the milestone structure omit the segment. Nothing declares the mnemonic — each entry states its full ID, and the mnemonic is read off the entries.
 
 - **Amend in place** when an entry is refined.
-- **Supersede with a forward pointer** when the pick flips. A reversed decision's existence is information; do not delete it.
+- **Replace with a pointer** when the pick flips: the entry's body goes, and `**CTRL-C0-04.** *Superseded by CTRL-C0-09.*` stands in its place, so a citation still lands and is redirected while git holds what it said. The superseding entry owes two things — the dead pick recorded as a rejection, and any clause of the old entry that did *not* flip carried forward. A supersession missing either loses information silently.
 - **IDs freeze at first commit.** Before that the log is a draft and may be renumbered.
 - **Cite across files by ID, never by section anchor.**
 

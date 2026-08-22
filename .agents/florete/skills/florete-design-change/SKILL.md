@@ -18,7 +18,7 @@ The page has two halves. **Prose** addresses whoever uses or implements the thin
 
 A **sketch** is the working form a shape starts as in greenfield mode, assertive so that it can be contested; the word retires once it hardens into the shape.
 
-A pass runs as a sequence of **stages**, four of them ending in a **gate** where work stops until the human agrees.
+A pass runs as a sequence of **stages**, five of them ending in a **gate** where work stops until the human agrees.
 
 This skill is self-contained: every rule it applies is stated here or in the two references below. Its design is `contributing/workflows/design.mdx` in the documentation repository, which carries the reasoning behind these rules and the alternatives they rejected. Read it to contest a rule, never to apply one.
 
@@ -61,8 +61,8 @@ Curation is a precondition of revision on a page with no skeleton. It may hand i
 | axes | `decision-log.md` | two independent lists, then `decisions.md` carrying one merged canonical list | the merged list is agreed |
 | options | | candidates, criterion and dependency, added to each axis in `decisions.md` | the candidates are agreed |
 | verdicts | | pick, because, accepting, rejected, added to each axis in `decisions.md` | every axis is ratified |
-| record | | the skeleton written into the page | it renders and the human picks: prose now, or stop |
-| prose | | orient, surface, internals | no gate; it ends when the human calls it done |
+| record | | the skeleton written into the page | it renders and the human accepts it |
+| prose | | orient, surface, internals | the human asks for the implementation handoff |
 
 The read stage is silent: no findings, no axes, nothing posted until the shape exists.
 
@@ -77,11 +77,11 @@ The stance is shared by both parties and shifts across the pass. State where the
 | Stages | Dominant stance | What it demands |
 | --- | --- | --- |
 | axes, options | Challenger | hunt for what is missing; do not converge on a pick |
-| verdicts, record | Decider | commit, and defend the commitment |
+| verdicts, record, prose | Decider | commit, and defend the commitment |
 
 Never answer the human's own list before it arrives.
 
-**The decision work has converged when there is nothing left to challenge.** What ends the pass is something else: the human's choice at the record gate, or their word that the prose is finished.
+**The decision work has converged when there is nothing left to challenge.** What ends the pass is something else: the human asking for the implementation handoff. That ask is a **completion signal, not a review** — judging prose belongs to review, in fresh context — and it is not a lock. If something is noticed afterwards the pass carries on and the note is re-issued.
 
 ## Prose
 
@@ -92,6 +92,8 @@ Orient is mandatory and headless by default; naming it is a per-page call. Surfa
 **The audience map is fixed; the placement is not.** Consumers read the surface, implementers the internals, architects the skeleton. Who counts as a consumer is domain-specific: product users for a product, another component's developers for a component, architects for a skill.
 
 Write orient last, once the sections it routes to exist.
+
+Prose is a stage like any other and clears its own gate. **A decision taken during it still enters through decisions.** Reviewing prose raises new questions, and answering one in the prose itself is the easiest mistake in the pass: the stage is active, the question looks small, and the log quietly stops describing the page. Name the axis, give its candidates, propose a verdict — **all three in one turn**, since the requirement is that the decision is recorded before the prose changes, not that it walks the gates again. Once it is ratified, `decisions.md` gains its block and the prose is rewritten from it. Edit prose directly only when the human asks for that.
 
 ## Working Files
 
@@ -113,10 +115,9 @@ Write orient last, once the sections it routes to exist.
 
 A form is filled by the human. A workspace is yours, and the human may also amend it in place. **Never rewrite a shared file wholesale — edit in place**, or a human edit disappears without a diff. Chat carries pointers and argument, never a copy of a file: link the file rather than pasting its contents, and address the shape by its block caption and label rather than by any identifier.
 
-Everything else you produce is a report, read once in chat — except the two handoffs, which are filed in the same directory because they cross a session:
+Everything else you produce is a report, read once in chat — except `impl-handoff.md`, which is filed in the same directory because it crosses a session. **It always ends the pass**, and carries the plan-shaped material the skeleton refuses: migration steps, current-state facts, ordering.
 
-- `prose-handoff.md`, at gate 4 and only when prose is deferred: findings, deliberate deferrals, cross-page effects, the framings that emerged in argument without becoming decisions, plus the implementation notes gathered so far.
-- `impl-handoff.md`, always, at the end of the pass: migration steps, current-state facts, ordering — the plan-shaped material the skeleton refuses.
+Nothing else is filed on a schedule. A note capturing where the pass currently stands can be written whenever the human asks for one, to continue in a fresh session; it is a way of managing context, not a stage artifact.
 
 Report the files at the end of the pass. Never delete them unasked.
 
