@@ -12,13 +12,14 @@ Sketch and shape have incompatible quality bars, which is why they carry differe
 - **Assert rather than hedge.** A hedged sketch produces no axes, because there is nothing to disagree with.
 - **Record what the design is** — never how it is currently built, nor the plan for getting there. That material belongs in `impl-handoff.md`.
 - **Give every named mechanism a home.** A shape can assert a mechanism without ever naming the artifact that implements it — a lock, a previous version, a subtree. Where a block names a mechanism, something in the shape says where it lives.
-- **Stay under a minute's reading.** A shape that needs longer has become the design rather than the map of it.
+- **Carry no rejections and no reasons.** `no bin override, no --prefix` is a rejected option, and *because* clauses turn a rule into a compacted log entry. Both belong in the decision log, where their reasoning lives; the shape states what the design *is*.
+- **Let size follow the subject.** There is no line count. A working shape is deliberately fuller than the one record compacts onto the page, and a complex subject earns a longer map — what a shape may never do is hide a dimension to stay short.
 
 ## Choosing A Form
 
-The form is chosen per topic, not mandated. Propose one; when more than one is compelling, let the human pick.
+The form is chosen per topic, not mandated. **Draft a form for the subject before reading the examples below**, then compare and pick — an example read first becomes the form you reach for, which is how a topic ends up in a shape that does not fit it. Where more than one is compelling, let the human choose.
 
-**Captioned blocks** suit a subject with several dimensions — this is the form used by `contributing/workflows/design.mdx`, whose own `### Shape` is the fullest worked example available:
+**Captioned blocks** suit a subject with several dimensions, and are the strongest default:
 
 ```
 **STRUCTURE**            what the thing is, its parts, and who each part serves
@@ -26,17 +27,36 @@ The form is chosen per topic, not mandated. Propose one; when more than one is c
 **RULES**                the constraints that hold across the whole
 ```
 
-Inside a block, a two-column layout — a label and its clause — reads faster than prose and makes a missing label obvious:
+Inside a block, a two-column layout — a label and its clause — reads faster than prose and makes a missing label obvious. A worked fragment:
 
 ```
-  modes       greenfield   nothing exists yet
-              revision     a skeleton exists; amend it
-              curation     prose exists, a skeleton does not; build one
+  STRUCTURE
+
+  what        an installer, run once per host
+              leaves a host ready to enrol; never enrols
+
+  artifacts   binaries    flor, coordinator, retectl
+              wrappers    one per OS supervision system
+
+  FLOW
+
+  install
+      ├─ present   → compare versions, then upgrade or stop
+      └─ absent    → unpack, register the wrapper, write the receipt
+
+  RULES
+
+  ownership   the installer owns host material; the agent owns rete material
+              nothing per-rete is written here
 ```
 
 **A single block** is right for a small subject: one structure listing, no flow, no rules. Do not manufacture the other blocks to fill the form.
 
 **A table** suits a subject whose whole content is one relation — a mode against what it starts from, a stage against its output. **Mermaid** earns its place only when the structure is genuinely graph-shaped and a nesting cannot express it; the repository already renders it, and `contributing/workflows/writing-docs.mdx` covers the mechanics.
+
+**Where two flows are subset-related, render them as one** and mark the steps that belong to only one of them. Adjacent sequences hide both the relationship and any divergence between them — including divergence you introduced by wording the shared steps twice. Not every pair of flows is subset-related; this is a form to reach for, not a rule.
+
+**Fence a shape as ```` ```log ````** on a page. A bare fence renders condensed and drops the blank lines the grouping depends on.
 
 ## Where The Shape Comes From
 
