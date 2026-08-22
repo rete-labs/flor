@@ -129,6 +129,25 @@ Report the files at the end of the pass. Never delete them unasked.
 
 At record, follow `contributing/workflows/writing-docs.mdx` through `../../references/discovery/documentation-lookup.md`. A new page needs its entry in the group's `meta.json` and frontmatter whose title and description each fit one line of a card. Relative links resolve as directories, so a sibling page is `../<slug>` and a page one group up is `../../<group>/<slug>`.
 
+A design page is assembled in this order:
+
+```
+---
+title, description              frontmatter
+---
+
+orient                          a lead paragraph, headless by default
+
+## <domain name>                surface, where the page has one
+## Shape                        the map, opening the internals
+## <domain names>               the rest of the internals
+## Decision Log                 last on the page
+```
+
+**The skeleton's two sections are named `Shape` and `Decision Log` on every page.** Neither is domain-specific — every design page has exactly one of each, meaning the same thing — and a citation from another page or an issue has to land somewhere. Prose sections keep their domain names, as always.
+
+The shape's heading level follows the internals: `## Shape` where the internals are several top-level sections, `### Shape` as the first subsection where they are one. The decision log is always top-level and always last.
+
 ## Invariants
 
 - No prose before the record gate clears.
