@@ -15,6 +15,10 @@ B6. Decision ID scheme. The ID's shape, and whether it is scoped to a page
 
 **The merged list** is grouped into lettered topics with a sequence inside each — `A1`, `A2`, `B1` — so an item can be inserted, split or closed without renumbering the rest. That scheme belongs to the merged list alone: the form you create for the human asks for plain sequential numbering, because two lists sharing one scheme make the merge's back-references ambiguous.
 
+**In curation, everything the page has already settled becomes an axis too.** One closes at once, as *closed by initial design*, when the prose gives a reason for it; where no reason can be recovered it stays open and takes candidates like any other. Nothing is harvested straight into a log entry: a settled decision that skips the axis list reaches the log only if you remember it exists, and it arrives with no options and no rejections. A closed-by-initial-design axis waits in the **inferred** group until the human has reviewed it.
+
+**Read for the seams as well as the sections.** Reading section by section finds what a section gets wrong; the axes that stay hidden are between sections. Sweep for the same rule stated twice with different content, a matrix that disagrees with a list, a mechanism named in one place and given a home in another, and a flag or surface referred to but defined nowhere.
+
 Three rules govern the list:
 
 - **Derivation.** An axis exists where the shape asserts something without warrant, or is silent where something must be settled.
@@ -61,6 +65,8 @@ topic identity that makes CTRL mean something.
 ```
 
 **A closed axis keeps everything it had.** Its full option list stays, with the pick marked, exactly as an open one — a rejection reason read apart from the option it rejects cannot be reviewed, and reviewing is what the file is for. Closing moves the block below the separator and adds the verdict; it removes nothing. Compression happens once, at record.
+
+**Name the claims a pick rests on.** Where the reasoning depends on a fact about the world rather than on judgement — that a channel exists, that a file is written where you think, that a release has shipped — state the claim and how it was checked. Reasoning quality does not distinguish a sound argument from a sound argument built on a false premise; naming the premise is what makes the gap visible to the person who may know better.
 
 **Flag ADR candidates here.** A decision whose reach extends past the page is an ADR candidate, and the reach is known when the verdict is written, not before. The human decides; the ADR is written outside this skill.
 

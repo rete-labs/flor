@@ -45,7 +45,7 @@ Inside a block, a two-column layout — a label and its clause — reads faster 
 | revision | read the existing skeleton and amend it | findings against the existing prose |
 | curation | extract it from the prose | findings, plus the decisions the prose already made implicitly |
 
-**Curation harvests rather than decides.** A page's prose has already settled things; the pass's job is to recover those decisions with their reasoning, not to re-open them. Where the prose settled something without a recoverable reason, that is an axis, not an entry.
+**Curation harvests rather than decides.** A page's prose has already settled things; the pass's job is to recover those decisions with their reasoning, not to re-open them. They still enter as axes and close immediately — `decision-log.md` carries the intake and what happens where a reason cannot be recovered.
 
 **Revision has no sketch.** The shape already exists and is held to the stricter bar; amend it in place.
 
