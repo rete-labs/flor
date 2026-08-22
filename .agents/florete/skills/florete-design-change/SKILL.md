@@ -64,7 +64,7 @@ Curation is a precondition of revision on a page with no skeleton. It may hand i
 | record | | the skeleton written into the page | it renders and the human accepts it |
 | prose | | orient, surface, internals | the human asks for the implementation handoff |
 
-The read stage is silent: no findings, no axes, nothing posted until the shape exists.
+The read stage is silent: no findings, no axes, nothing posted until the shape exists. It also establishes **what is built and what is only designed** — a design page states intent, and a verdict resting on a component, channel or file that does not exist yet is the failure this prevents. What it finds goes into the handoff, dated by the pass rather than maintained.
 
 **A gate is a state, not a message.** Questions, redraws and amendments happen inside it. **A stage gates what may be started, never what may still be changed** — entering verdicts freezes neither axes nor options, so there are no re-entry paths. *Amend* at the verdicts gate means changing a pick or reopening that axis's options.
 
@@ -109,7 +109,9 @@ Prose is a stage like any other and clears its own gate. **A decision taken duri
 
 **Both lists are written independently.** Yours goes to `axes-agent.md` before you read theirs; the merge then produces `decisions.md`, and both starting lists are sealed — they are the record of what the merge did to their items. Suggest deleting the sealed files at record, where nothing reads them any more; never delete them unasked.
 
-**`decisions.md` is one file that grows.** An axis keeps its full option list with the pick marked, open and closed alike — a rejection reason without the option it rejects cannot be reviewed. Compaction happens once, at record, and not before. Show a counter, an open group, and a closed group below a separator.
+**`decisions.md` is one file that grows.** An axis keeps its full option list with the pick marked, wherever it sits — a rejection reason without the option it rejects cannot be reviewed. Compaction happens once, at record, and not before.
+
+Show a counter and, below it, **open**, **inferred** and **closed** groups. Inferred holds what curation harvested and nobody has yet reviewed; an item moves to closed once the human has. It is a state rather than a category, so the group empties as the pass proceeds, and anything left in it at record is an unratified axis. Curation is the only mode that fills it — greenfield has nothing to infer from, and revision inherits it only when curation runs ahead of it in the same pass.
 
 **Live files stay current for the whole pass, prose included.** A decision that changes while prose is being written changes in `decisions.md` at that moment. Sealed files are left exactly where their stage ended and are never walked back to.
 
