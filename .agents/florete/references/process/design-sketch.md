@@ -11,6 +11,7 @@ Sketch and shape have incompatible quality bars, which is why they carry differe
 - **Cover dynamic behaviour** wherever the subject has any. Static structure alone hides exactly the mechanics a reader cannot reconstruct.
 - **Assert rather than hedge.** A hedged sketch produces no axes, because there is nothing to disagree with.
 - **Record what the design is** — never how it is currently built, nor the plan for getting there. That material belongs in `impl-handoff.md`.
+- **Give every named mechanism a home.** A shape can assert a mechanism without ever naming the artifact that implements it — a lock, a previous version, a subtree. Where a block names a mechanism, something in the shape says where it lives.
 - **Stay under a minute's reading.** A shape that needs longer has become the design rather than the map of it.
 
 ## Choosing A Form
@@ -52,6 +53,8 @@ Inside a block, a two-column layout — a label and its clause — reads faster 
 ## Lifecycle
 
 `shape.md` emerges when the target is read, and is amended as decisions land — **never regenerated from the verdicts**. Regeneration loses what incremental amendment keeps: a one-shot rewrite has no memory of what each decision was reacting to, and produces something thinner than the sketch it replaced.
+
+**Amending means checking every block the verdict touches, not only the one it came from.** A pick that changes a flow can invalidate a rule three blocks away, and the shape then holds two statements that cannot both be true — which is a defect in the artifact whose job is to make silences visible.
 
 **The shape has no identifier scheme, deliberately.** Findings and axes carry identifiers because they persist and are cited for days; a pointer into the shape lives for one exchange. Address a block by its caption and its label — *RULES / media*, *FLOW, the migration step* — which needs no assignment, survives a reordering, and cannot be mistaken for an axis or a finding. Quote the line where a block has no labels.
 

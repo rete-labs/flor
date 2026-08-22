@@ -66,7 +66,7 @@ Curation is a precondition of revision on a page with no skeleton. It may hand i
 
 The read stage is silent: no findings, no axes, nothing posted until the shape exists. It also establishes **what is built and what is only designed** — a design page states intent, and a verdict resting on a component, channel or file that does not exist yet is the failure this prevents. What it finds goes into the handoff, dated by the pass rather than maintained.
 
-**A gate is a state, not a message.** Questions, redraws and amendments happen inside it. **A stage gates what may be started, never what may still be changed** — entering verdicts freezes neither axes nor options, so there are no re-entry paths. *Amend* at the verdicts gate means changing a pick or reopening that axis's options.
+**A gate is a state, not a message.** Questions, redraws and amendments happen inside it. **A stage gates what may be started, never what may still be changed** — entering verdicts freezes neither axes nor options, so there are no re-entry paths. *Amend* at the verdicts gate means changing a pick or reopening that axis's options. **A pick that flips carries a duty**: sweep the closed group for decisions that rested on it, and reopen the ones that no longer hold.
 
 With no human present no condition can clear: emit the shape and halt at the first gate.
 
