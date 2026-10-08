@@ -35,7 +35,7 @@ Inside a block, a two-column layout — a label and its clause — reads faster 
   what        an installer, run once per host
               leaves a host ready to enrol; never enrols
 
-  artifacts   binaries    flor, coordinator, retectl
+  artifacts   binaries    flor, coordinator, rete
               wrappers    one per OS supervision system
 
   FLOW
