@@ -46,12 +46,12 @@ State which repositories were searched. A result from one repository alone is no
 
 Look for an issue number in common Florete branch forms, including:
 
-- `feat/30/add-retectl-validate`
+- `feat/30/add-rete-validate`
 - `fix/30/validate-discovery-mode`
-- `docs/30/design-retectl-validate`
-- `chore/30/add-retectl-validate`
-- `issue-30-retectl-validate`
-- `30-retectl-validate`
+- `docs/30/design-rete-validate`
+- `chore/30/add-rete-validate`
+- `issue-30-rete-validate`
+- `30-rete-validate`
 
 Any `<type>/<number>/<slug>` branch follows this shape; the type prefix is not a closed set.
 
